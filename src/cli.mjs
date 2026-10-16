@@ -239,7 +239,7 @@ async function main() {
       `amount   ${p.amount} ${p.symbol}${p.token ? '  (token ' + p.token + ')' : ''}`,
       `max fee  ${p.fee} ${p.feeSymbol || p.symbol}${p.gas ? '  (gas ' + p.gas + ', nonce ' + p.nonce + ')' : ''}`,
       `balance  ${p.balance} -> ${p.after} ${p.symbol}`,
-      `policy   ${prep.policy.policy ? (prep.policy.ok ? 'ok' : 'DENIED') + (prep.policy.limit ? `  (per-tx ${prep.policy.limit.perTx ?? '-'}, per-day ${prep.policy.limit.perDay ?? '-'}, spent 24h ${prep.policy.spentToday})` : '') : 'none (CLI only)'}`,
+      `policy   ${prep.policy.policy ? (prep.policy.ok ? 'ok' : 'DENIED') + (prep.policy.limit ? `  (per-tx ${prep.policy.limit.perTx ?? '-'}, per-day ${prep.policy.limit.perDay ?? '-'}, spent 24h ${prep.policy.spentToday})` : '') : 'none (CLI only)'}${p.nativeCost ? `  + native side cost ${p.nativeCost} ${p.feeSymbol} checked against the native limit` : ''}`,
       ...prep.policy.reasons.map(x => `POLICY   ${x}`),
       ...p.warnings.map(x => `WARNING  ${x}`),
     ].join('\n'));

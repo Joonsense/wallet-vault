@@ -107,6 +107,8 @@ export async function previewTokenSend(chain, { from, to, amount, spec, privateK
     return {
       key: chain, from, to, amount: formatUnits(units, decimals), symbol: sym, token: t.address, tokenKey: t.known ? t.symbolHint : t.address,
       fee: (fee + rent) / LAMPORTS_PER_SOL, feeSymbol: 'SOL', balance: formatUnits(have, decimals), after: formatUnits(have - units, decimals), warnings,
+      // Native value that leaves the wallet to a third party (rent for the recipient's new token account). Policy-checked as a native spend.
+      nativeCost: rent ? rent / LAMPORTS_PER_SOL : 0,
       _prepare: async () => { tx.sign(kp); const sig = base58.encode(tx.signature); return { hash: sig, send: async () => { const s = await conn.sendRawTransaction(tx.serialize()); await conn.confirmTransaction({ signature: s, blockhash, lastValidBlockHeight }, 'confirmed'); return `${s} (confirmed)`; } }; },
     };
   }

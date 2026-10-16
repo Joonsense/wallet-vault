@@ -45,6 +45,19 @@ export async function prepareSend({ entry, key, vault, chain, to: rawTo, amount,
   const w = materialize(entry, readSecret(entry, key), index);
   const args = { from: isSol(chain) ? w.sol.address : w.evm.address, to, amount, privateKey: w.evm?.privateKey, secretKey: w.sol?.secretKey };
   const preview = token ? await tokens.previewTokenSend(chain, { ...args, spec: token }) : await previewSend(chain, args);
+  // A token send that also pays native value to a third party (Solana ATA rent) must pass the native policy too.
+  if (preview.nativeCost > 0) {
+    const native = evaluate(entry, { chain, to, amount: preview.nativeCost, via, key, vault, token: null });
+    if (!native.ok) {
+      policy.ok = false;
+      policy.reasons.push(...native.reasons.map(r => `native side cost ${preview.nativeCost} (recipient token account rent): ${r}`));
+      if (via !== 'cli') {
+        await withLedgerLock(() => { try { log({ attempt: randomBytes(6).toString('hex'), wallet: entry.id, label: entry.label, chain, token: tk, to, amount: Number(amount), via, status: 'denied', reasons: policy.reasons }); } catch {} });
+        return { to, policy, preview: null, token: tk };
+      }
+    }
+    policy.nativeCost = preview.nativeCost;
+  }
   return { to, policy, preview, token: tk };
 }
 
@@ -61,26 +74,31 @@ export async function executeSend({ entry, key, vault, chain, via, preview, over
   const attempt = randomBytes(6).toString('hex');
   const token = preview.tokenKey || null;
   const base = { attempt, wallet: entry.id, label: entry.label, chain, token, to: preview.to, amount: Number(preview.amount), via, overridden };
+  // Native side cost (e.g. Solana ATA rent) gets its own ledger row so it counts against the native budget.
+  const side = preview.nativeCost > 0 ? { ...base, attempt: `${attempt}-rent`, token: null, amount: Number(preview.nativeCost), sideOf: attempt } : null;
   const { hash, send } = await preview._prepare();
   await withLedgerLock(() => {
     if (!overridden) {
       const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via, key, vault, token });
-      if (!check.ok) {
-        log({ ...base, status: 'denied', reasons: check.reasons });
-        const err = new Error(`policy denied at broadcast time: ${check.reasons.join('; ')}`);
-        err.denied = true; err.reasons = check.reasons;
+      const native = side ? evaluate(entry, { chain, to: preview.to, amount: side.amount, via, key, vault, token: null }) : { ok: true, reasons: [] };
+      if (!check.ok || !native.ok) {
+        const reasons = [...check.reasons, ...native.reasons.map(r => `native side cost: ${r}`)];
+        log({ ...base, status: 'denied', reasons });
+        const err = new Error(`policy denied at broadcast time: ${reasons.join('; ')}`);
+        err.denied = true; err.reasons = reasons;
         throw err;
       }
     }
     log({ ...base, hash, status: 'pending' });
+    if (side) log({ ...side, hash, status: 'pending' });
   });
   try {
     const result = await send();
-    await withLedgerLock(() => log({ ...base, hash, status: 'sent', result: String(result) }));
+    await withLedgerLock(() => { log({ ...base, hash, status: 'sent', result: String(result) }); if (side) log({ ...side, hash, status: 'sent' }); });
     return result;
   } catch (e) {
     // We cannot know whether the RPC accepted it before failing. Keep it on the budget.
-    await withLedgerLock(() => log({ ...base, hash, status: 'unknown', error: (e.shortMessage || e.message || String(e)).slice(0, 200) }));
+    await withLedgerLock(() => { log({ ...base, hash, status: 'unknown', error: (e.shortMessage || e.message || String(e)).slice(0, 200) }); if (side) log({ ...side, hash, status: 'unknown' }); });
     e.message = `${e.shortMessage || e.message} [recorded as unknown, hash ${hash}; run: wv reconcile ${entry.label}]`;
     throw e;
   }
