@@ -46,3 +46,13 @@ test('recipient validation', async () => {
   assert.deepEqual(resolveChainKeys('ethereum,ARB,solana'), ['eth', 'arb', 'sol']);
   assert.throws(() => resolveChainKeys('tron'), /unknown chain/);
 });
+
+test('hyperliquid agent name rules', async () => {
+  const { agentNameFor } = await import('../src/hl.mjs');
+  assert.equal(agentNameFor('', 0), '');
+  assert.equal(agentNameFor('bot1', 0), 'bot1');
+  assert.match(agentNameFor('bot1', 30), /^bot1 valid_until \d{13}$/);
+  assert.throws(() => agentNameFor('', 10), /unnamed/);
+  assert.throws(() => agentNameFor('x'.repeat(17), 0), /1\.\.16/);
+  assert.throws(() => agentNameFor('bot1', 181), /--days/);
+});

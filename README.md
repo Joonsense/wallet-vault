@@ -63,6 +63,22 @@ wv send test1 --chain sol-devnet --to <addr> --amount 0.1
 - `--dry-run` 은 서명·전송 없이 미리보기만. `--yes` 없이는 "send" 를 타이핑해야 나간다.
 - 네이티브 토큰만. ERC-20·SPL 토큰 전송은 없다.
 
+## Hyperliquid API 지갑 (agent wallet)
+
+HL 봇은 메인 계정 키 대신 메인이 승인한 agent 키로 서명한다. agent 는 거래만 하고 출금은 못 한다.
+wv 는 agent 키 생성 → 볼트 저장 → 메인 키로 approveAgent EIP-712 서명·제출을 한 명령으로 한다.
+
+```bash
+wv hl agents main --testnet                      # 승인된 agent 목록 + 만료, 볼트에 키가 있는지 표시
+wv hl new-agent main --name swan --days 30       # 새 키 생성 + 승인 (메인넷, "approve" 타이핑 확인)
+wv hl approve main --agent 7 --name swan         # 볼트의 기존 키 승인
+eval "$(wv env hl-swan)"                         # 봇에는 agent 키만 주입, 계정 조회는 메인 주소로
+```
+
+규칙 (HL 문서 기준): 계정당 unnamed 1개 + named 3개, named 는 `--days` 로 최대 180일 만료 지정. 같은 이름으로 다시 승인하면 이전 agent 가 해제된다.
+한 번 쓰고 해제된 agent 주소는 nonce 집합이 정리돼 재승인 시 과거 서명이 재생될 수 있으므로 재사용하지 않는다. `new-agent` 가 항상 새 키를 만드는 이유다.
+승인이 거절돼도 agent 키는 볼트에 남고 note 에 사유가 기록된다 (예: 메인이 HL 에 입금한 적 없으면 "Must deposit before performing actions").
+
 ## 보관 방식
 
 | 항목 | 값 |
@@ -70,6 +86,7 @@ wv send test1 --chain sol-devnet --to <addr> --amount 0.1
 | 볼트 위치 | `~/.wallet-vault/vault.json` (`WV_VAULT` 로 변경), 권한 600 |
 | 키 파생 | scrypt N=2^17 r=8 p=1, 볼트당 salt 32바이트 |
 | 암호화 | AES-256-GCM, 지갑 항목마다 별도 iv·tag |
+| HL 서명 | @nktkas/hyperliquid ExchangeClient (viem 계정), 메인넷 api.hyperliquid.xyz / 테스트넷 api.hyperliquid-testnet.xyz |
 | 암호 입력 | 숨김 프롬프트, 또는 `WV_PASSPHRASE` 환경변수 (.env 에만, 커밋 금지) |
 | 파생 경로 | EVM `m/44'/60'/0'/0/i`, Solana `m/44'/501'/i'/0'` (MetaMask·Phantom 과 동일) |
 

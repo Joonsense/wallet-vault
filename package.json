@@ -15,6 +15,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@nktkas/hyperliquid": "0.33.3",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "@scure/base": "^2.4.0",

@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { DEFAULT_VAULT_PATH, deriveKey, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
+import { listAgents, accountValue, agentNameFor, approveAgent, fmtValidUntil, HL_MAX_DAYS } from './hl.mjs';
 import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, ALL_KEYS, MAINNET_KEYS, TESTNET_KEYS, isSol, isTestnet, solAirdrop, EVM_FAUCETS } from './chains.mjs';
 
 const HELP = `wv - local encrypted wallet vault (EVM + Solana)
@@ -16,6 +17,13 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv balance <id|label> [--chain base,sol | all | testnets] [--index N] [--json]
   wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes]
   wv faucet <id|label> --chain sol-devnet [--amount 1]      # devnet airdrop; EVM testnets print faucet URLs
+
+  Hyperliquid API wallets (agent keys that trade for a main account but cannot withdraw):
+  wv hl agents <main> [--testnet]                           # approved agents + expiry, marks ones held in this vault
+  wv hl new-agent <main> [--name bot1] [--days 30] [--testnet] [--dry-run] [--yes]
+                                                            # fresh EVM key -> vault -> approveAgent signed by <main>
+  wv hl approve <main> --agent <id|label> [--name ..] [--days N] [--testnet] [--yes]
+                                                            # approve a wallet already in the vault (never reuse a retired agent)
   wv import <label> (--mnemonic | --evm | --sol) [--chain ...]   # secret is asked via hidden prompt, never argv
   wv rename <id|label> <new-label>
   wv rm <id|label> [--yes]
@@ -41,6 +49,10 @@ const { values: opt, positionals } = parseArgs({
     to: { type: 'string' },
     amount: { type: 'string' },
     'dry-run': { type: 'boolean' },
+    testnet: { type: 'boolean' },
+    name: { type: 'string' },
+    days: { type: 'string' },
+    agent: { type: 'string' },
     mnemonic: { type: 'boolean' },
     evm: { type: 'boolean' },
     sol: { type: 'boolean' },
@@ -258,6 +270,76 @@ async function main() {
     if (!e.addresses.evm) err('wallet has no evm key');
     console.log(`${k} has no RPC faucet. Paste this address into one of:\n  ${e.addresses.evm}\n` + EVM_FAUCETS[k].map(u => `  ${u}`).join('\n'));
     return;
+  }
+
+  if (cmd === 'hl') {
+    const sub = args[0] ?? err('hl subcommand required: agents | new-agent | approve');
+    const net = opt.testnet ? 'testnet' : 'MAINNET';
+    const { vault, key } = await open();
+    const main = findEntry(vault, args[1] ?? err('main wallet ref required'));
+    if (!main.addresses.evm) err('main wallet has no EVM key');
+    const inVault = (addr) => vault.entries.find(x => x.addresses.evm && x.addresses.evm.toLowerCase() === addr.toLowerCase());
+
+    if (sub === 'agents') {
+      const [agents, value] = await Promise.all([listAgents(main.addresses.evm, !!opt.testnet), accountValue(main.addresses.evm, !!opt.testnet).catch(() => null)]);
+      warn(`${net}  main ${main.addresses.evm} (#${main.id} ${main.label})  account value ${value == null ? '?' : '$' + value.toFixed(2)}`);
+      if (opt.json) { console.log(JSON.stringify(agents, null, 2)); return; }
+      if (!agents.length) { console.log('(no approved agents)'); return; }
+      for (const a of agents) {
+        const held = inVault(a.address);
+        console.log(`${(a.name || '(unnamed)').padEnd(18)} ${a.address}  ${fmtValidUntil(a.validUntil).padEnd(24)} ${held ? 'vault #' + held.id + ' ' + held.label : 'key NOT in vault'}`);
+      }
+      return;
+    }
+
+    if (sub === 'new-agent' || sub === 'approve') {
+      const days = opt.days ? Number(opt.days) : 0;
+      const hlName = agentNameFor(opt.name || '', days);
+      let agent;
+      if (sub === 'approve') {
+        agent = findEntry(vault, opt.agent ?? err('--agent <id|label> required'));
+        if (!agent.addresses.evm) err('agent wallet has no EVM key');
+        if (agent.id === main.id) err('agent must be a different wallet from main');
+        if (/retired|rotated/i.test(agent.note || '')) err('this agent was retired; HL docs warn against re-approving a used agent address. Use new-agent.');
+      }
+      const label = opt.name ? `hl-${opt.name}` : `hl-agent`;
+      const plan = [
+        `network   ${net}${opt.testnet ? '' : '  (real account)'}`,
+        `main      ${main.addresses.evm}  (#${main.id} ${main.label})`,
+        `agent     ${agent ? agent.addresses.evm + '  (#' + agent.id + ' ' + agent.label + ')' : '(fresh key, label ' + label + (vault.entries.some(x => x.label === label) ? '-' + (vault.nextId) : '') + ')'}`,
+        `name      ${hlName || '(unnamed: replaces the current unnamed agent)'}`,
+        `expiry    ${days ? days + ' days' : opt.name ? 'HL default for named agents' : 'HL default'}  (max ${HL_MAX_DAYS} days via --days)`,
+        `effect    agent can trade for main, cannot withdraw. ${opt.name ? 'A same-named agent is deregistered.' : ''}`,
+      ];
+      warn(plan.join('\n'));
+      if (opt['dry-run']) { warn('dry-run: nothing signed'); return; }
+      if (!opt.yes) {
+        const a = await visiblePrompt(`Sign approveAgent with main key on ${net}? type "approve": `);
+        if (a !== 'approve') err('aborted');
+      }
+      const mainSecret = readSecret(main, key);
+      if (!agent) {
+        const mnemonic = generateMnemonic(24);
+        const { addresses, secret } = walletFromMnemonic(mnemonic, ['evm'], 0);
+        const finalLabel = vault.entries.some(x => x.label === label) ? `${label}-${vault.nextId}` : label;
+        agent = addEntry(vault, key, { label: finalLabel, chains: ['evm'], addresses, secret, note: `HL agent of #${main.id} ${main.label} (${net}) pending approval` });
+        saveVaultFile(vault);
+        warn(`agent key saved as #${agent.id} ${agent.label} ${agent.addresses.evm}`);
+      }
+      try {
+        const { response } = await approveAgent({ mainPrivateKey: mainSecret.evmPrivateKey, agentAddress: agent.addresses.evm, agentName: hlName, testnet: !!opt.testnet });
+        agent.note = `HL agent of #${main.id} ${main.label} (${net}) name=${hlName || '(unnamed)'} approved ${new Date().toISOString().slice(0, 10)}`;
+        saveVaultFile(vault);
+        console.log(JSON.stringify(response));
+        warn(`approved. bots use: eval "$(wv env ${agent.label})"  -> EVM_PRIVATE_KEY is the agent key, main address stays ${main.addresses.evm}`);
+      } catch (x) {
+        agent.note = `HL agent of #${main.id} ${main.label} (${net}) approval FAILED: ${(x.message || String(x)).slice(0, 80)}`;
+        saveVaultFile(vault);
+        err(`approveAgent rejected: ${x.message || x}\n(agent key kept as #${agent.id} ${agent.label}; fix the cause, then: wv hl approve ${main.label} --agent ${agent.id}${opt.name ? ' --name ' + opt.name : ''}${opt.testnet ? ' --testnet' : ''})`);
+      }
+      return;
+    }
+    err(`unknown hl subcommand "${sub}"`);
   }
 
   if (cmd === 'import') {
