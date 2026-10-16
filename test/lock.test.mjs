@@ -7,9 +7,10 @@ process.env.WV_LEDGER = join(mkdtempSync(join(tmpdir(), 'wvl-')), 'ledger.jsonl'
 const { deriveKey, emptyVault, signPolicy, encrypt, entryAad, setLedgerMeta } = await import('../src/vault.mjs');
 const vault = emptyVault();
 const key = deriveKey('unit test passphrase', vault.kdf.salt);
-setLedgerMeta(key, vault, { started: false });
+setLedgerMeta(key, vault);
+const { initLedger } = await import('../src/ledger.mjs');
+initLedger(key, vault);
 const signed = (e) => { e.enc ||= encrypt(key, '{}', entryAad(e.id)); signPolicy(key, e); return e; };
-const markStarted = () => {};
 const { executeSend, reconcile } = await import('../src/ops.mjs');
 const { history, spentInWindow } = await import('../src/ledger.mjs');
 

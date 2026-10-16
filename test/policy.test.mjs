@@ -7,9 +7,10 @@ process.env.WV_LEDGER = join(mkdtempSync(join(tmpdir(), 'wvl-')), 'ledger.jsonl'
 const { deriveKey, emptyVault, signPolicy, encrypt, entryAad, setLedgerMeta } = await import('../src/vault.mjs');
 const vault = emptyVault();
 const key = deriveKey('unit test passphrase', vault.kdf.salt);
-setLedgerMeta(key, vault, { started: false });
+setLedgerMeta(key, vault);
+const { initLedger } = await import('../src/ledger.mjs');
+initLedger(key, vault);
 const signed = (e) => { e.enc ||= encrypt(key, '{}', entryAad(e.id)); signPolicy(key, e); return e; };
-const markStarted = () => {};
 const { evaluate } = await import('../src/policy.mjs');
 const { appendLedger, spentInWindow, verifyLedger, withLedgerLock } = await import('../src/ledger.mjs');
 
@@ -39,7 +40,7 @@ test('daily window counts sent + pending, not failed/denied', () => {
     { attempt: 'a3', wallet: 7, chain: 'base', amount: 0.01, status: 'failed' },
     { attempt: 'a4', wallet: 7, chain: 'base', amount: 0.01, status: 'denied' },
     { attempt: 'a5', wallet: 8, chain: 'base', amount: 0.01, status: 'sent' },
-  ]) appendLedger(r, key, vault, markStarted);
+  ]) appendLedger(r, key, vault);
   assert.equal(verifyLedger(key, vault).ok, true);
   assert.equal(spentInWindow(7, 'base'), 0.02);
   const e = signed({ ...base, policy: structuredClone(pol) });
@@ -59,7 +60,7 @@ test('tampering is detected: edited policy, truncated ledger, edited record', as
   const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
   writeFileSync(path, lines.slice(0, -1).join('\n') + '\n');           // truncate
   assert.match(verifyLedger(key, vault).reason, /truncated/);
-  assert.throws(() => appendLedger({ attempt: 'x', wallet: 7, chain: 'base', amount: 0.01, status: 'sent' }, key, vault, markStarted), /integrity/);
+  assert.throws(() => appendLedger({ attempt: 'x', wallet: 7, chain: 'base', amount: 0.01, status: 'sent' }, key, vault), /integrity/);
   const last = JSON.parse(lines[lines.length - 1]); last.amount = 0; lines[lines.length - 1] = JSON.stringify(last);
   writeFileSync(path, lines.join('\n') + '\n');                        // edit a record
   assert.match(verifyLedger(key, vault).reason, /fails its MAC/);
@@ -71,7 +72,7 @@ test('tampering is detected: edited policy, truncated ledger, edited record', as
 test('deleting both ledger files is detected once the epoch has a ledger', async () => {
   const { rmSync } = await import('node:fs');
   rmSync(process.env.WV_LEDGER); rmSync(process.env.WV_LEDGER + '.head');
-  assert.match(verifyLedger(key, vault).reason, /deleted/);
+  assert.match(verifyLedger(key, vault).reason, /missing or deleted/);
   const e = signed({ ...base, id: 11, policy: structuredClone(pol) });
   assert.match(evaluate(e, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.001, via: 'mcp', key, vault }).reasons.join(), /ledger integrity/);
 });
@@ -84,12 +85,13 @@ test('policy MAC binds addresses and ciphertext (cannot move a policy onto anoth
   assert.match(evaluate(swapped, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.001, via: 'mcp', key, vault }).reasons.join(), /policy signature invalid/);
 });
 
-test('forging the vault ledger flag is detected; rotation drops tampered policies', async () => {
+test('missing/forged ledger metadata fails closed; rotation drops tampered policies', async () => {
   const { rotatePassphrase, verifyPolicy } = await import('../src/vault.mjs');
-  const v2 = emptyVault(); const k2 = deriveKey('another passphrase!', v2.kdf.salt); setLedgerMeta(k2, v2, { started: true });
-  v2.ledgerMeta.started = false;                       // attacker flips the flag to pretend no ledger existed
-  assert.match(verifyLedger(k2, v2).reason, /forged/);
-  setLedgerMeta(k2, v2, { started: false });
+  const v2 = emptyVault(); const k2 = deriveKey('another passphrase!', v2.kdf.salt);
+  assert.match(verifyLedger(k2, v2).reason, /missing or forged/);       // no meta at all
+  setLedgerMeta(k2, v2); v2.ledgerEpoch = 'swapped';                      // epoch swapped under a valid-looking mac
+  assert.match(verifyLedger(k2, v2).reason, /missing or forged/);
+  v2.ledgerEpoch = emptyVault().ledgerEpoch; setLedgerMeta(k2, v2);
   const good = { id: 1, label: 'g', chains: ['evm'], addresses: { evm: '0x1' }, policy: { chains: ['base'], allow: [], limits: { base: { perTx: 1 } }, agent: true } };
   good.enc = encrypt(k2, '{}', entryAad(1)); signPolicy(k2, good);
   const bad = { id: 2, label: 'b', chains: ['evm'], addresses: { evm: '0x2' }, policy: { chains: ['base'], allow: [], limits: { base: { perTx: 1 } }, agent: true }, policyMac: 'ff' };

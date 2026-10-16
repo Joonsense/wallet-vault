@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { DEFAULT_VAULT_PATH, deriveKey, verifyPolicy, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
-import { prepareSend, executeSend, reconcile, applyPolicyFlags } from './ops.mjs';
+import { prepareSend, executeSend, reconcile, applyPolicyFlags, openVaultFull } from './ops.mjs';
 import { describePolicy } from './policy.mjs';
 import { history, verifyLedger, rewriteLedger, resetLedgerEpoch, withLedgerLock, LEDGER_PATH } from './ledger.mjs';
 import { listAgents, accountValue, agentNameFor, approveAgent, fmtValidUntil, HL_MAX_DAYS } from './hl.mjs';
@@ -95,9 +95,9 @@ function fmtEntry(e) {
   return `#${e.id}  ${e.label.padEnd(16)}  evm ${e.addresses.evm || '-'}  sol ${e.addresses.sol || '-'}  ${e.createdAt.slice(0, 10)}${e.note ? '  ' + e.note : ''}`;
 }
 
-async function open({ confirm = false } = {}) {
+async function open({ confirm = false, allowBrokenLedgerMeta = false } = {}) {
   const pass = await getPassphrase({ confirm });
-  return openVault(pass);
+  return openVaultFull(pass, DEFAULT_VAULT_PATH, { allowBrokenLedgerMeta });
 }
 
 async function confirmReveal(what) {
@@ -270,7 +270,7 @@ async function main() {
 
   if (cmd === 'ledger') {
     const sub = args[0] || 'verify';
-    const { key, vault } = await open();
+    const { key, vault } = await open({ allowBrokenLedgerMeta: sub === 'reset' });
     if (sub === 'verify') {
       const v = verifyLedger(key, vault);
       console.log(v.ok ? `ok: ${v.count} records, head matches (${LEDGER_PATH})` : `FAIL: ${v.reason}`);

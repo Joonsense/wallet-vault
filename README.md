@@ -94,8 +94,11 @@ wv history bot                                                    # ~/.wallet-va
 
 | 대상 | 방식 | 깨지면 |
 | --- | --- | --- |
-| entry.policy | HMAC(id + policy) 를 `policyMac` 에 저장, `wv policy *` 만 갱신 | MCP 에서 지갑이 숨겨지고, CLI 는 경고 + 정책 거부 사유로 표시 |
-| ledger.jsonl | 레코드마다 이전 MAC 에 체인된 HMAC, 머리(count·mac) 는 `ledger.head` 에 서명 저장 | 에이전트 send 거부, CLI 는 `--override-policy` 로만 진행, `wv ledger verify` 로 원인 확인 |
+| entry.policy | HMAC(id + chains + addresses + 암호문 + policy) 를 `policyMac` 에 저장, 비밀 암호문은 항목 id 를 AAD 로 묶음 (정책을 다른 지갑 항목에 옮겨 붙일 수 없음) | MCP 에서 지갑이 숨겨지고, CLI 는 경고 + 정책 거부 사유로 표시 |
+| ledger.jsonl | 레코드마다 이전 MAC 에 체인된 HMAC, 머리(count·mac) 는 `ledger.head` 에 서명 저장. 볼트 생성 시 빈 원장 + genesis head 가 같이 생기므로 "원장이 없는 상태" 는 존재하지 않는다 | 파일이 없거나 잘리면 에이전트 send 거부, CLI 는 `--override-policy` 로만 진행 |
+| vault.ledgerMeta | epoch 를 볼트 키로 서명한 표식. 없거나 틀리면 볼트가 열리지 않는다(fail closed) | 명시적 `wv ledger reset`(암호 필요, "reset" 타이핑) 만 새 epoch 를 만들고 옛 파일은 archived 로 보존 |
+| 암호 교체 | 재암호화 전에 정책을 검증하고, 통과한 정책만 새 키로 재서명. 실패 정책은 폐기 보고. 원장 전체를 새 키로 재MAC | 원장 검증 실패 상태에서는 교체 거부 |
+| 정책 편집 | 서명이 깨진 정책 위에는 set 불가(clear 후 재설정), 원장 검증 실패 중에도 불가. 항목의 키가 주소와 일치하는지 확인 후 서명 | |
 | 락 | mkdir 원자 생성 + 소유자 토큰, 30초 지난 락은 rename 으로 한 프로세스만 탈취 | 10초 대기 후 "lock timeout" |
 
 위협 모델을 정직하게 적으면: 이 장치는 MCP 도구 경계로 들어오는 에이전트의 실수·프롬프트 인젝션·"파일을 고쳐 한도를 풀기" 를 막는다. 같은 사용자 권한으로 임의 셸을 실행하는 에이전트가 키체인에서 암호를 직접 꺼내는 것, 또는 vault.json·ledger.jsonl·ledger.head 세 파일을 과거 시점으로 함께 되돌리는 롤백은 막지 못한다. 그 둘은 에이전트에 셸 권한을 주지 않는 것과 백업 보관으로 다뤄야 한다.

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { openVault, loadVaultFile, verifyPolicy, DEFAULT_VAULT_PATH } from './vault.mjs';
 import { getPassphrase } from './prompt.mjs';
 import { nativeBalance, resolveChainKeys, symbolOf, explorerTx, ALL_KEYS, isSol } from './chains.mjs';
-import { prepareSend, executeSend } from './ops.mjs';
+import { prepareSend, executeSend, openVaultFull } from './ops.mjs';
 import { describePolicy } from './policy.mjs';
 import { history } from './ledger.mjs';
 
@@ -18,7 +18,7 @@ export async function startMcp() {
     throw new Error('MCP mode needs WV_PASSPHRASE or WV_PASSPHRASE_CMD (no interactive prompt on stdio)');
   }
   const pass = await getPassphrase();
-  let { vault, key } = openVault(pass, DEFAULT_VAULT_PATH);
+  let { vault, key } = await openVaultFull(pass, DEFAULT_VAULT_PATH);
   let salt = vault.kdf.salt;
 
   // Re-read the vault file on every call so CLI policy edits apply live; re-derive the key only if the salt changed.
@@ -26,6 +26,7 @@ export async function startMcp() {
     const v = loadVaultFile(DEFAULT_VAULT_PATH);
     if (!v) throw new Error('vault file disappeared');
     if (v.kdf.salt !== salt) { ({ vault, key } = openVault(pass, DEFAULT_VAULT_PATH)); salt = vault.kdf.salt; }
+    else if (!v.ledgerMeta) throw new Error('vault ledger metadata missing (fail closed)');
     else vault = v;
     return vault;
   };

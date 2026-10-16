@@ -45,7 +45,7 @@ export function emptyVault() {
     kdf: { ...KDF, salt: b64(randomBytes(32)) },
     check: null,       // encrypted CHECK_PLAINTEXT, used to verify the passphrase quickly
     ledgerEpoch: b64(randomBytes(32)),  // binds the ledger chain to this vault instance
-    ledgerMeta: null,                   // { started, mac }: signed flag that this epoch has a ledger (so deleting it is detected)
+    ledgerMeta: null,                   // { mac }: signed epoch marker; set once at creation, never recreated implicitly
     nextId: 1,
     entries: [],
   };
@@ -72,8 +72,13 @@ export function backupVaultFile(dest, path = DEFAULT_VAULT_PATH) {
   chmodSync(dest, 0o600);
 }
 
-/** Open (or create) a vault with a passphrase. Returns { vault, key, path, created }. */
-export function openVault(passphrase, path = DEFAULT_VAULT_PATH) {
+/**
+ * Open (or create) a vault with a passphrase. Returns { vault, key, path, created }.
+ * A vault whose signed ledger metadata is missing or invalid does not open (fail closed); only `wv ledger reset`
+ * passes allowBrokenLedgerMeta to repair it explicitly. New vaults get their metadata here; the caller must then
+ * initialise the ledger files (ops.openVaultFull does both).
+ */
+export function openVault(passphrase, path = DEFAULT_VAULT_PATH, { allowBrokenLedgerMeta = false } = {}) {
   let vault = loadVaultFile(path);
   let created = false;
   if (!vault) {
@@ -92,11 +97,11 @@ export function openVault(passphrase, path = DEFAULT_VAULT_PATH) {
     vault.check = encrypt(key, CHECK_PLAINTEXT);
     saveVaultFile(vault, path);
   }
-  if (!vault.ledgerEpoch || !vault.ledgerMeta) {
-    // first open of an old-format vault, or a fresh one: start an epoch with no ledger yet
-    if (!vault.ledgerEpoch) vault.ledgerEpoch = b64(randomBytes(32));
-    setLedgerMeta(key, vault, { started: false });
+  if (created) {
+    setLedgerMeta(key, vault);
     saveVaultFile(vault, path);
+  } else if (!verifyLedgerMeta(key, vault) && !allowBrokenLedgerMeta) {
+    throw new Error('vault ledger metadata missing or invalid (vault.json edited or rolled back). Run "wv ledger reset" to start a new epoch explicitly.');
   }
   return { vault, key, path, created };
 }
@@ -151,7 +156,7 @@ export function rotatePassphrase(vault, oldKey, newPassphrase) {
     if (!e.policy) continue;
     if (policyOk.get(e.id)) signPolicy(newKey, e); else { delete e.policy; delete e.policyMac; dropped.push(e.label); }
   }
-  setLedgerMeta(newKey, vault, { started: !!vault.ledgerMeta?.started });
+  setLedgerMeta(newKey, vault);
   return { newKey, droppedPolicies: dropped };
 }
 
@@ -184,15 +189,14 @@ export function verifyPolicy(key, entry) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** Vault-level signed ledger flag. No per-entry re-signing anywhere. */
-export function setLedgerMeta(key, vault, { started }) {
-  const body = { epoch: vault.ledgerEpoch, started: !!started };
-  vault.ledgerMeta = { started: !!started, mac: hmacHex(macKey(key, 'ledger-meta'), stableStringify(body)) };
+/** Vault-level signed epoch marker. There is no "no ledger yet" state: every epoch has a ledger head from birth. */
+export function setLedgerMeta(key, vault) {
+  vault.ledgerMeta = { mac: hmacHex(macKey(key, 'ledger-meta'), stableStringify({ epoch: vault.ledgerEpoch })) };
 }
 export function verifyLedgerMeta(key, vault) {
   const m = vault?.ledgerMeta;
-  if (!m || typeof m.mac !== 'string') return false;
-  const want = hmacHex(macKey(key, 'ledger-meta'), stableStringify({ epoch: vault.ledgerEpoch, started: !!m.started }));
+  if (!m || typeof m.mac !== 'string' || !vault.ledgerEpoch) return false;
+  const want = hmacHex(macKey(key, 'ledger-meta'), stableStringify({ epoch: vault.ledgerEpoch }));
   const a = Buffer.from(want, 'hex'), b = Buffer.from(m.mac, 'hex');
   return a.length === b.length && timingSafeEqual(a, b);
 }

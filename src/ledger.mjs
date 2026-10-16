@@ -29,8 +29,7 @@ function readHead() {
 /** Verify chain + head against this vault's epoch. Returns { ok, reason, records, count, head }. */
 export function verifyLedger(key, vault) {
   if (!vault?.ledgerEpoch) return { ok: false, reason: 'vault has no ledger epoch', records: [], count: 0, head: null };
-  if (!verifyLedgerMeta(key, vault)) return { ok: false, reason: 'vault ledger flag (ledgerMeta) missing or forged', records: [], count: 0, head: null };
-  const started = !!vault.ledgerMeta.started;
+  if (!verifyLedgerMeta(key, vault)) return { ok: false, reason: 'vault ledger metadata (ledgerMeta) missing or forged', records: [], count: 0, head: null };
   const sub = macKey(key, 'ledger');
   const records = rawRecords();
   const head = readHead();
@@ -41,31 +40,18 @@ export function verifyLedger(key, vault) {
     if (!r.mac || !eq(recordMac(sub, prev, r), r.mac)) return { ok: false, reason: `record ${i + 1} (${r.attempt || '?'}) fails its MAC`, records, count: records.length, head };
     prev = r.mac;
   }
-  if (!head) {
-    // No head at all: only acceptable while the ledger has never been written in this epoch.
-    if (records.length === 0 && !existsSync(LEDGER_PATH)) return { ok: !started, reason: started ? 'ledger files deleted (vault says this epoch has a ledger)' : null, records, count: 0, head: null };
-    return { ok: false, reason: 'ledger has records but ledger.head is missing', records, count: records.length, head };
-  }
+  if (!head) return { ok: false, reason: records.length ? 'ledger has records but ledger.head is missing' : 'ledger files missing or deleted (every epoch has a head from creation; "wv ledger reset" starts a new one)', records, count: records.length, head: null };
   if (head._corrupt || !eq(headSig(sub, vault, head.count, head.mac), head.sig)) return { ok: false, reason: 'ledger.head signature invalid (wrong vault epoch or edited)', records, count: records.length, head };
   if (head.count !== records.length || !eq(head.mac, prev)) return { ok: false, reason: `ledger truncated or edited (head says ${head.count} records, file has ${records.length})`, records, count: records.length, head };
   return { ok: true, reason: null, records, count: records.length, head };
 }
 
-/**
- * Append one record (call under the ledger lock). Refuses to extend a ledger that fails verification.
- * The first write of an epoch flips the vault-level signed flag (ledgerMeta.started) via `saveVault(vault)` so that
- * deleting the ledger files later is detected. Nothing else in the vault is touched or re-signed.
- */
-export function appendLedger(rec, key, vault, saveVault) {
+/** Append one record (call under the ledger lock). Refuses to extend a ledger that fails verification. */
+export function appendLedger(rec, key, vault) {
   if (!key || !vault) throw new Error('appendLedger needs the vault key and vault');
   const sub = macKey(key, 'ledger');
   const v = verifyLedger(key, vault);
   if (!v.ok) throw new Error(`ledger integrity failure: ${v.reason} (inspect ${LEDGER_PATH}; wv ledger verify)`);
-  if (!vault.ledgerMeta.started) {
-    if (typeof saveVault !== 'function') throw new Error('first ledger write needs saveVault');
-    setLedgerMeta(key, vault, { started: true });
-    saveVault(vault);
-  }
   const prev = v.count ? v.records[v.count - 1].mac : genesisFor(vault);
   const body = { ts: new Date().toISOString(), ...rec };
   const mac = recordMac(sub, prev, body);
@@ -161,10 +147,27 @@ export function rewriteLedger(newKey, vault, v) {
   renameSync(tmpH, HEAD_PATH);
 }
 
-/** Start a new epoch: archive current ledger files, reset the signed flag. Policies are untouched. */
+function writeGenesisHead(key, vault) {
+  const sub = macKey(key, 'ledger');
+  const g = genesisFor(vault);
+  mkdirSync(dirname(LEDGER_PATH), { recursive: true, mode: 0o700 });
+  writeFileSync(LEDGER_PATH, '', { mode: 0o600, flag: 'wx' });
+  const tmp = `${HEAD_PATH}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify({ count: 0, mac: g, sig: headSig(sub, vault, 0, g) }), { mode: 0o600 });
+  renameSync(tmp, HEAD_PATH);
+}
+
+/** Create the ledger files for a brand new vault (call once, under the lock). Refuses if anything is already there. */
+export function initLedger(key, vault) {
+  if (existsSync(LEDGER_PATH) || existsSync(HEAD_PATH)) throw new Error(`ledger files already exist at ${LEDGER_PATH}; use "wv ledger reset"`);
+  writeGenesisHead(key, vault);
+}
+
+/** Start a new epoch: archive current ledger files, new epoch marker, fresh genesis head. Policies are untouched. */
 export function resetLedgerEpoch(key, vault, newEpochB64) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   for (const f of [LEDGER_PATH, HEAD_PATH]) if (existsSync(f)) renameSync(f, `${f}.archived-${stamp}`);
   vault.ledgerEpoch = newEpochB64;
-  setLedgerMeta(key, vault, { started: false });
+  setLedgerMeta(key, vault);
+  writeGenesisHead(key, vault);
 }
