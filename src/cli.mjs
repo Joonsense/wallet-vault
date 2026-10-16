@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { existsSync } from 'node:fs';
-import { DEFAULT_VAULT_PATH, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
+import { DEFAULT_VAULT_PATH, deriveKey, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
-import { getPassphrase, visiblePrompt } from './prompt.mjs';
+import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
 
 const HELP = `wv - local encrypted wallet vault (EVM + Solana)
 
@@ -12,7 +12,7 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv show <id|label|address> [--index N]
   wv export <id|label> (--mnemonic | --evm | --sol) [--index N] [--yes]
   wv env <id|label> [--index N]            # eval "$(wv env trader1)" -> EVM_PRIVATE_KEY, SOL_SECRET_KEY
-  wv import <label> (--mnemonic "..." | --evm 0x... | --sol <base58|json>) [--chain ...]
+  wv import <label> (--mnemonic | --evm | --sol) [--chain ...]   # secret is asked via hidden prompt, never argv
   wv rename <id|label> <new-label>
   wv rm <id|label> [--yes]
   wv passwd                                # rotate vault passphrase
@@ -161,9 +161,13 @@ async function main() {
 
   if (cmd === 'import') {
     const label = args[0] ?? err('label required');
-    const raw = rawFlag('mnemonic') ?? null, evmPk = rawFlag('evm') ?? null, solKey = rawFlag('sol') ?? null;
+    if (!opt.mnemonic && !opt.evm && !opt.sol) err('choose --mnemonic, --evm or --sol (the secret is prompted, never passed on the command line)');
+    if (process.argv.some(a => /^(0x)?[0-9a-fA-F]{64}$/.test(a) || a.split(/\s+/).length >= 12)) err('never pass secrets as arguments; they end up in shell history and ps. Use the prompt.');
     const { vault, key, created } = await open({ confirm: !existsVault() });
     if (created) warn(`created new vault at ${DEFAULT_VAULT_PATH}`);
+    const raw = opt.mnemonic ? await hiddenPrompt('Paste mnemonic (hidden): ') : null;
+    const evmPk = opt.evm ? await hiddenPrompt('Paste EVM private key (hidden): ') : null;
+    const solKey = opt.sol ? await hiddenPrompt('Paste Solana secret key (hidden): ') : null;
     let addresses = {}, secret, chains;
     if (raw) {
       chains = chainsFromOpt();
@@ -172,7 +176,7 @@ async function main() {
       secret = { kind: 'raw' }; chains = [];
       if (evmPk) { const w = evmFromPrivateKey(evmPk); addresses.evm = w.address; secret.evmPrivateKey = w.privateKey; chains.push('evm'); }
       if (solKey) { const w = solFromSecretKey(solKey); addresses.sol = w.address; secret.solSecretKey = w.secretKey; chains.push('sol'); }
-      if (!chains.length) err('give --mnemonic "..." or --evm 0x... or --sol <key>');
+      if (!chains.length) err('empty secret');
     }
     const dup = vault.entries.find(e => CHAINS.some(c => addresses[c] && e.addresses[c] === addresses[c]));
     if (dup) err(`already stored as #${dup.id} ${dup.label}`);
@@ -206,7 +210,10 @@ async function main() {
 
   if (cmd === 'passwd') {
     const { vault, key } = await open();
-    const next = await getPassphrase({ confirm: true, label: 'New passphrase' });
+    // New passphrase is always prompted; WV_PASSPHRASE is deliberately ignored here.
+    const next = await hiddenPrompt('New passphrase: ');
+    if (next !== await hiddenPrompt('Confirm new passphrase: ')) err('passphrases do not match');
+    if (!existsVaultChanged(vault, key, next)) err('new passphrase must differ from the current one');
     rotatePassphrase(vault, key, next);
     saveVaultFile(vault);
     warn('passphrase rotated, all entries re-encrypted');
@@ -223,14 +230,9 @@ async function main() {
   err(`unknown command "${cmd}"\n${HELP}`);
 }
 
-// parseArgs with strict:false treats --mnemonic "x" as boolean + positional; recover the value here.
-function rawFlag(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  if (i === -1) return undefined;
-  const v = process.argv[i + 1];
-  return v && !v.startsWith('--') ? v : undefined;
-}
-
 function existsVault() { return existsSync(DEFAULT_VAULT_PATH); }
+function existsVaultChanged(vault, key, candidate) {
+  try { return !deriveKey(candidate, vault.kdf.salt, vault.kdf).equals(key); } catch { return true; }
+}
 
 main().catch(e => err(e.message));

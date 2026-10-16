@@ -21,10 +21,10 @@ wv export trader1 --mnemonic      # 니모닉 오프라인 백업용 (reveal 타
 wv export trader1 --evm           # EVM 개인키
 wv export trader1 --sol           # Solana 비밀키 (Phantom 가져오기 형식, base58 64바이트)
 eval "$(wv env trader1)"          # 현재 셸에 EVM_PRIVATE_KEY / SOL_SECRET_KEY 주입 (봇 실행용)
-wv import cold --mnemonic "..."   # 기존 니모닉 가져오기
-wv import hot --evm 0x...         # 원시 개인키 가져오기 (--sol <base58|json> 도 가능)
+wv import cold --mnemonic         # 기존 니모닉 가져오기 (숨김 프롬프트로 입력, 인자로 넘기면 거부)
+wv import hot --evm               # 원시 개인키 가져오기 (--sol 은 base58 또는 JSON 배열)
 wv rm trader1                     # 라벨 타이핑 확인 후 삭제
-wv passwd                         # 볼트 암호 교체 (전부 재암호화)
+wv passwd                         # 볼트 암호 교체 (항상 프롬프트, WV_PASSPHRASE 무시, 같은 암호 거부)
 wv backup ~/Backups/vault.json    # 암호화된 상태로 복사
 ```
 
