@@ -6,7 +6,7 @@ import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFro
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
 import { prepareSend, executeSend, reconcile, applyPolicyFlags } from './ops.mjs';
 import { describePolicy } from './policy.mjs';
-import { history, verifyLedger, LEDGER_PATH } from './ledger.mjs';
+import { history, verifyLedger, rewriteLedger, resetLedgerEpoch, withLedgerLock, LEDGER_PATH } from './ledger.mjs';
 import { listAgents, accountValue, agentNameFor, approveAgent, fmtValidUntil, HL_MAX_DAYS } from './hl.mjs';
 import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, txStatus, ALL_KEYS, MAINNET_KEYS, TESTNET_KEYS, isSol, isTestnet, solAirdrop, EVM_FAUCETS } from './chains.mjs';
 
@@ -21,7 +21,7 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes] [--override-policy]
   wv history [<id|label>] [--limit 20]                       # local spend ledger (${'~/.wallet-vault/ledger.jsonl'})
   wv reconcile [<id|label>]                                  # settle pending/unknown ledger rows from chain state
-  wv ledger verify                                           # HMAC chain + head check (policy and ledger are signed with the vault key)
+  wv ledger verify | reset                                   # HMAC chain + head check / start a new epoch (archives the old ledger)
 
   Spend policy (bounds every send; agents via MCP cannot exceed it, CLI needs --override-policy + "override"):
   wv policy show <id|label>
@@ -269,11 +269,22 @@ async function main() {
   }
 
   if (cmd === 'ledger') {
+    const sub = args[0] || 'verify';
     const { key, vault } = await open();
-    const v = verifyLedger(key, vault);
-    console.log(v.ok ? `ok: ${v.count} records, head matches (${LEDGER_PATH})` : `FAIL: ${v.reason}`);
-    if (!v.ok) process.exit(2);
-    return;
+    if (sub === 'verify') {
+      const v = verifyLedger(key, vault);
+      console.log(v.ok ? `ok: ${v.count} records, head matches (${LEDGER_PATH})` : `FAIL: ${v.reason}`);
+      if (!v.ok) process.exit(2);
+      return;
+    }
+    if (sub === 'reset') {
+      if (!opt.yes) { const a = await visiblePrompt('Archive the current ledger and start a new epoch (24h budgets reset to zero)? type "reset": '); if (a !== 'reset') err('aborted'); }
+      const { randomBytes } = await import('node:crypto');
+      await withLedgerLock(() => { resetLedgerEpoch(key, vault, randomBytes(32).toString('base64')); saveVaultFile(vault); });
+      warn('new ledger epoch started; old files kept as *.archived-<time>');
+      return;
+    }
+    err('ledger subcommand: verify | reset');
   }
 
   if (cmd === 'reconcile') {
@@ -289,7 +300,7 @@ async function main() {
     const sub = args[0] ?? err('policy subcommand: show | set | allow | deny | clear');
     const { vault, key } = await open();
     const e = findEntry(vault, args[1] ?? err('wallet ref required'));
-    if (sub === 'show') { console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}${e.policy && !verifyPolicy(key, e, vault) ? '\nWARNING  policy signature INVALID (edited outside wv); agents will not see this wallet until re-saved' : ''}`); return; }
+    if (sub === 'show') { console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}${e.policy && !verifyPolicy(key, e) ? '\nWARNING  policy signature INVALID (edited outside wv); agents will not see this wallet until re-saved' : ''}`); return; }
     if (sub === 'set') {
       const chains = opt.chain === 'all' ? [] : opt.chain === '*' ? ['*'] : resolveChainKeys(opt.chain);
       const agent = opt.agent == null ? null : /^(on|true|yes|1)$/i.test(opt.agent) ? true : /^(off|false|no|0)$/i.test(opt.agent) ? false : err('--agent on|off');
@@ -463,9 +474,14 @@ async function main() {
     const next = await hiddenPrompt('New passphrase: ');
     if (next !== await hiddenPrompt('Confirm new passphrase: ')) err('passphrases do not match');
     if (!existsVaultChanged(vault, key, next)) err('new passphrase must differ from the current one');
-    rotatePassphrase(vault, key, next);
-    saveVaultFile(vault);
-    warn('passphrase rotated, all entries re-encrypted');
+    const lv = verifyLedger(key, vault);
+    if (!lv.ok) err(`refusing to rotate while the ledger fails verification: ${lv.reason}`);
+    await withLedgerLock(() => {
+      const { newKey, droppedPolicies } = rotatePassphrase(vault, key, next);
+      rewriteLedger(key, newKey, vault);
+      saveVaultFile(vault);
+      warn(`passphrase rotated, all entries re-encrypted, ledger re-signed${droppedPolicies.length ? `; DROPPED unverifiable policies on: ${droppedPolicies.join(', ')}` : ''}`);
+    });
     return;
   }
 

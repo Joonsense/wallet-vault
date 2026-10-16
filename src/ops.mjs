@@ -1,11 +1,11 @@
 // Shared send pipeline for CLI and MCP: validate -> policy -> preview -> (confirm outside) -> ledger pending -> broadcast -> ledger result.
 import { randomBytes } from 'node:crypto';
-import { readSecret, signPolicy, markLedgerStarted } from './vault.mjs';
+import { readSecret, signPolicy, verifyPolicy, saveVaultFile } from './vault.mjs';
 import { evmFromPrivateKey, solFromSecretKey } from './wallets.mjs';
 import { evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { previewSend, validateRecipient, isSol } from './chains.mjs';
 import { evaluate } from './policy.mjs';
-import { appendLedger, withLedgerLock } from './ledger.mjs';
+import { appendLedger, withLedgerLock, verifyLedger } from './ledger.mjs';
 
 /** Addresses + secrets of an entry at a derivation index (0 = stored values). */
 export function materialize(e, s, idx = 0) {
@@ -25,7 +25,7 @@ export function materialize(e, s, idx = 0) {
  */
 export async function prepareSend({ entry, key, vault, chain, to: rawTo, amount, index = 0, via = 'cli' }) {
   if (!vault) throw new Error('prepareSend needs the vault');
-  const log = (rec) => appendLedger(rec, key, vault, (v) => markLedgerStarted(key, v));
+  const log = (rec) => appendLedger(rec, key, vault, (v) => saveVaultFile(v));
   const to = validateRecipient(chain, rawTo);
   if (!entry.chains.includes(isSol(chain) ? 'sol' : 'evm')) throw new Error(`wallet has no ${isSol(chain) ? 'solana' : 'evm'} key`);
   const policy = evaluate(entry, { chain, to, amount, via, key, vault });
@@ -50,7 +50,7 @@ export async function prepareSend({ entry, key, vault, chain, to: rawTo, amount,
  */
 export async function executeSend({ entry, key, vault, chain, via, preview, overridden = false }) {
   if (!key || !vault) throw new Error('executeSend needs the vault key and vault');
-  const log = (rec) => appendLedger(rec, key, vault, (v) => markLedgerStarted(key, v));
+  const log = (rec) => appendLedger(rec, key, vault, (v) => saveVaultFile(v));
   const attempt = randomBytes(6).toString('hex');
   const base = { attempt, wallet: entry.id, label: entry.label, chain, to: preview.to, amount: Number(preview.amount), via, overridden };
   const { hash, send } = await preview._prepare();
@@ -87,7 +87,7 @@ export async function reconcile(records, { txStatus, key, vault }) {
     if (st === 'confirmed') after = 'sent';
     else if (st === 'reverted') after = 'failed';
     else if (st === 'notfound' && Date.now() - Date.parse(r.ts) > 48 * 3_600_000) after = 'failed'; // past any nonce/blockhash validity
-    if (after !== r.status) await withLedgerLock(() => appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st }, key, vault, (v) => markLedgerStarted(key, v)));
+    if (after !== r.status) await withLedgerLock(() => appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st }, key, vault, (v) => saveVaultFile(v)));
     out.push({ attempt: r.attempt, hash: r.hash, chain: r.chain, before: r.status, chainStatus: st, after });
   }
   return out;
@@ -95,7 +95,11 @@ export async function reconcile(records, { txStatus, key, vault }) {
 
 /** Mutate entry.policy from CLI flags. */
 export function applyPolicyFlags(entry, key, vault, { chains, perTx, perDay, agent, note, allowAdd, allowRemove, clear }) {
-  if (clear) { delete entry.policy; signPolicy(key, entry, vault); return; }
+  if (clear) { delete entry.policy; signPolicy(key, entry); return; }
+  // Never build on top of an unverified policy (it may have been edited on disk): clear first, then set fresh.
+  if (entry.policy && !verifyPolicy(key, entry)) throw new Error('existing policy fails its signature; run "wv policy clear" first, then set it again');
+  const lv = verifyLedger(key, vault);
+  if (!lv.ok) throw new Error(`refusing to sign a policy while the ledger fails verification: ${lv.reason} ("wv ledger verify", or "wv ledger reset" to start a new epoch)`);
   // Refuse to sign a policy onto an entry whose secret does not derive to its stated addresses.
   const sec = readSecret(entry, key);
   if (entry.addresses.evm && evmFromPrivateKey(sec.evmPrivateKey).address.toLowerCase() !== entry.addresses.evm.toLowerCase()) throw new Error('entry EVM address does not match its key; refusing to sign policy');
@@ -118,5 +122,5 @@ export function applyPolicyFlags(entry, key, vault, { chains, perTx, perDay, age
   for (const a of allowAdd || []) if (!p.allow.includes(a)) p.allow.push(a);
   if (allowRemove?.length) p.allow = p.allow.filter(a => !allowRemove.some(r => r.toLowerCase() === a.toLowerCase()));
   entry.policy = p;
-  signPolicy(key, entry, vault);
+  signPolicy(key, entry);
 }

@@ -44,7 +44,8 @@ export function emptyVault() {
     createdAt: new Date().toISOString(),
     kdf: { ...KDF, salt: b64(randomBytes(32)) },
     check: null,       // encrypted CHECK_PLAINTEXT, used to verify the passphrase quickly
-    ledgerEpoch: b64(randomBytes(32)),  // binds ledger + policy MACs to this vault instance; a ledger from elsewhere or none at all fails
+    ledgerEpoch: b64(randomBytes(32)),  // binds the ledger chain to this vault instance
+    ledgerMeta: null,                   // { started, mac }: signed flag that this epoch has a ledger (so deleting it is detected)
     nextId: 1,
     entries: [],
   };
@@ -91,8 +92,10 @@ export function openVault(passphrase, path = DEFAULT_VAULT_PATH) {
     vault.check = encrypt(key, CHECK_PLAINTEXT);
     saveVaultFile(vault, path);
   }
-  if (!vault.ledgerEpoch) {
-    vault.ledgerEpoch = b64(randomBytes(32));
+  if (!vault.ledgerEpoch || !vault.ledgerMeta) {
+    // first open of an old-format vault, or a fresh one: start an epoch with no ledger yet
+    if (!vault.ledgerEpoch) vault.ledgerEpoch = b64(randomBytes(32));
+    setLedgerMeta(key, vault, { started: false });
     saveVaultFile(vault, path);
   }
   return { vault, key, path, created };
@@ -137,12 +140,19 @@ export function removeEntry(vault, entry) {
 export function rotatePassphrase(vault, oldKey, newPassphrase) {
   const fresh = emptyVault();
   const newKey = deriveKey(newPassphrase, fresh.kdf.salt, fresh.kdf);
+  // Verify policies BEFORE re-encrypting: the policy MAC binds the ciphertext.
+  const policyOk = new Map(vault.entries.map(e => [e.id, !e.policy || verifyPolicy(oldKey, e)]));
   vault.entries = vault.entries.map(e => ({ ...e, enc: encrypt(newKey, decrypt(oldKey, e.enc, entryAad(e.id)), entryAad(e.id)) }));
   vault.kdf = fresh.kdf;
   vault.check = encrypt(newKey, CHECK_PLAINTEXT);
-  // policies were signed with the old key: re-sign them
-  for (const e of vault.entries) signPolicy(newKey, e, vault);
-  return newKey;
+  // Re-sign only policies that verify under the old key; a tampered policy is dropped, never laundered.
+  const dropped = [];
+  for (const e of vault.entries) {
+    if (!e.policy) continue;
+    if (policyOk.get(e.id)) signPolicy(newKey, e); else { delete e.policy; delete e.policyMac; dropped.push(e.label); }
+  }
+  setLedgerMeta(newKey, vault, { started: !!vault.ledgerMeta?.started });
+  return { newKey, droppedPolicies: dropped };
 }
 
 // ---- Integrity: policy + ledger are plaintext metadata, so they are authenticated with a subkey of the vault key.
@@ -159,25 +169,30 @@ export function stableStringify(v) {
 export function hmacHex(subkey, data) {
   return createHmac('sha256', subkey).update(data).digest('hex');
 }
-function policyBinding(entry, vault) {
-  return stableStringify({ id: entry.id, chains: entry.chains, addresses: entry.addresses, enc: entry.enc, policy: entry.policy, epoch: vault?.ledgerEpoch ?? null, started: !!vault?.ledgerStarted });
+function policyBinding(entry) {
+  return stableStringify({ id: entry.id, chains: entry.chains, addresses: entry.addresses, enc: entry.enc, policy: entry.policy });
 }
-export function signPolicy(key, entry, vault) {
+export function signPolicy(key, entry) {
   if (!entry.policy) { delete entry.policyMac; return; }
-  if (!vault) throw new Error('signPolicy needs the vault (ledger epoch)');
-  entry.policyMac = hmacHex(macKey(key, 'policy'), policyBinding(entry, vault));
+  entry.policyMac = hmacHex(macKey(key, 'policy'), policyBinding(entry));
 }
-export function verifyPolicy(key, entry, vault) {
+export function verifyPolicy(key, entry) {
   if (!entry.policy) return !entry.policyMac;
-  if (!entry.policyMac || !vault) return false;
-  const want = hmacHex(macKey(key, 'policy'), policyBinding(entry, vault));
+  if (!entry.policyMac) return false;
+  const want = hmacHex(macKey(key, 'policy'), policyBinding(entry));
   const a = Buffer.from(want, 'hex'), b = Buffer.from(String(entry.policyMac), 'hex');
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** First ledger write of an epoch: flag the vault and re-sign every policy so the flag cannot be removed unnoticed. */
-export function markLedgerStarted(key, vault, path = DEFAULT_VAULT_PATH) {
-  vault.ledgerStarted = true;
-  for (const e of vault.entries) if (e.policy) signPolicy(key, e, vault);
-  saveVaultFile(vault, path);
+/** Vault-level signed ledger flag. No per-entry re-signing anywhere. */
+export function setLedgerMeta(key, vault, { started }) {
+  const body = { epoch: vault.ledgerEpoch, started: !!started };
+  vault.ledgerMeta = { started: !!started, mac: hmacHex(macKey(key, 'ledger-meta'), stableStringify(body)) };
+}
+export function verifyLedgerMeta(key, vault) {
+  const m = vault?.ledgerMeta;
+  if (!m || typeof m.mac !== 'string') return false;
+  const want = hmacHex(macKey(key, 'ledger-meta'), stableStringify({ epoch: vault.ledgerEpoch, started: !!m.started }));
+  const a = Buffer.from(want, 'hex'), b = Buffer.from(m.mac, 'hex');
+  return a.length === b.length && timingSafeEqual(a, b);
 }

@@ -31,7 +31,7 @@ test('vault encrypt/decrypt + rotate', () => {
   assert.equal(readSecret(e, k).evmPrivateKey, '0xabc');
   const bad = deriveKey('wrong wrong wrong', v.kdf.salt, v.kdf);
   assert.throws(() => decrypt(bad, e.enc));
-  const k2 = rotatePassphrase(v, k, 'new passphrase here');
+  const { newKey: k2 } = rotatePassphrase(v, k, 'new passphrase here');
   assert.equal(readSecret(v.entries[0], k2).evmPrivateKey, '0xabc');
   assert.throws(() => decrypt(k, v.entries[0].enc));
   assert.equal(decrypt(k2, v.check), 'wallet-vault-check-v1');

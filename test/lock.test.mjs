@@ -4,11 +4,12 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 process.env.WV_LEDGER = join(mkdtempSync(join(tmpdir(), 'wvl-')), 'ledger.jsonl');
-const { deriveKey, emptyVault, signPolicy, encrypt, entryAad } = await import('../src/vault.mjs');
+const { deriveKey, emptyVault, signPolicy, encrypt, entryAad, setLedgerMeta } = await import('../src/vault.mjs');
 const vault = emptyVault();
 const key = deriveKey('unit test passphrase', vault.kdf.salt);
-const signed = (e) => { e.enc ||= encrypt(key, '{}', entryAad(e.id)); signPolicy(key, e, vault); return e; };
-const markStarted = (v) => { v.ledgerStarted = true; for (const e of v.entries) if (e.policy) signPolicy(key, e, v); };
+setLedgerMeta(key, vault, { started: false });
+const signed = (e) => { e.enc ||= encrypt(key, '{}', entryAad(e.id)); signPolicy(key, e); return e; };
+const markStarted = () => {};
 const { executeSend, reconcile } = await import('../src/ops.mjs');
 const { history, spentInWindow } = await import('../src/ledger.mjs');
 

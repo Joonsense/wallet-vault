@@ -34,7 +34,7 @@ export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now
   const p = entry.policy;
   const amt = Number(amount);
   if (!key || !vault) throw new Error('evaluate needs the vault key and vault');
-  if (!verifyPolicy(key, entry, vault)) reasons.push('policy signature invalid: vault.json was edited outside wv (re-save with wv policy set, or wv policy clear)');
+  if (!verifyPolicy(key, entry)) reasons.push('policy signature invalid: vault.json was edited outside wv (re-save with wv policy set, or wv policy clear)');
   const ledger = verifyLedger(key, vault);
   if (!ledger.ok) reasons.push(`ledger integrity failure: ${ledger.reason}`);
   if (!p) {

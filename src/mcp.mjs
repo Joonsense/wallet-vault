@@ -31,7 +31,7 @@ export async function startMcp() {
   };
   const agentWallets = () => fresh().entries.filter(e => {
     if (!e.policy?.agent) return false;
-    if (!verifyPolicy(key, e, vault)) { process.stderr.write(`wallet-vault: policy MAC invalid on #${e.id} ${e.label}; hidden from agents\n`); return false; }
+    if (!verifyPolicy(key, e)) { process.stderr.write(`wallet-vault: policy MAC invalid on #${e.id} ${e.label}; hidden from agents\n`); return false; }
     return true;
   });
   const pick = (ref) => {

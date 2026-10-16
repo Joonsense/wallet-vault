@@ -4,11 +4,12 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 process.env.WV_LEDGER = join(mkdtempSync(join(tmpdir(), 'wvl-')), 'ledger.jsonl');
-const { deriveKey, emptyVault, signPolicy, encrypt, entryAad } = await import('../src/vault.mjs');
+const { deriveKey, emptyVault, signPolicy, encrypt, entryAad, setLedgerMeta } = await import('../src/vault.mjs');
 const vault = emptyVault();
 const key = deriveKey('unit test passphrase', vault.kdf.salt);
-const signed = (e) => { e.enc ||= encrypt(key, '{}', entryAad(e.id)); signPolicy(key, e, vault); return e; };
-const markStarted = (v) => { v.ledgerStarted = true; for (const e of v.entries) if (e.policy) signPolicy(key, e, v); };
+setLedgerMeta(key, vault, { started: false });
+const signed = (e) => { e.enc ||= encrypt(key, '{}', entryAad(e.id)); signPolicy(key, e); return e; };
+const markStarted = () => {};
 const { evaluate } = await import('../src/policy.mjs');
 const { appendLedger, spentInWindow, verifyLedger, withLedgerLock } = await import('../src/ledger.mjs');
 
@@ -41,7 +42,7 @@ test('daily window counts sent + pending, not failed/denied', () => {
   ]) appendLedger(r, key, vault, markStarted);
   assert.equal(verifyLedger(key, vault).ok, true);
   assert.equal(spentInWindow(7, 'base'), 0.02);
-  const e = signed({ ...base, policy: structuredClone(pol) });   // signed after ledgerStarted flipped (binding includes it)
+  const e = signed({ ...base, policy: structuredClone(pol) });
   const r = evaluate(e, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.01, via: 'mcp', key, vault });
   assert.equal(r.ok, true);
   const r2 = evaluate(e, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.0101, via: 'mcp', key, vault });
@@ -81,4 +82,21 @@ test('policy MAC binds addresses and ciphertext (cannot move a policy onto anoth
   assert.match(evaluate(moved, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.001, via: 'mcp', key, vault }).reasons.join(), /policy signature invalid/);
   const swapped = { ...e, enc: encrypt(key, '{"other":1}', entryAad(12)) };
   assert.match(evaluate(swapped, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.001, via: 'mcp', key, vault }).reasons.join(), /policy signature invalid/);
+});
+
+test('forging the vault ledger flag is detected; rotation drops tampered policies', async () => {
+  const { rotatePassphrase, verifyPolicy } = await import('../src/vault.mjs');
+  const v2 = emptyVault(); const k2 = deriveKey('another passphrase!', v2.kdf.salt); setLedgerMeta(k2, v2, { started: true });
+  v2.ledgerMeta.started = false;                       // attacker flips the flag to pretend no ledger existed
+  assert.match(verifyLedger(k2, v2).reason, /forged/);
+  setLedgerMeta(k2, v2, { started: false });
+  const good = { id: 1, label: 'g', chains: ['evm'], addresses: { evm: '0x1' }, policy: { chains: ['base'], allow: [], limits: { base: { perTx: 1 } }, agent: true } };
+  good.enc = encrypt(k2, '{}', entryAad(1)); signPolicy(k2, good);
+  const bad = { id: 2, label: 'b', chains: ['evm'], addresses: { evm: '0x2' }, policy: { chains: ['base'], allow: [], limits: { base: { perTx: 1 } }, agent: true }, policyMac: 'ff' };
+  bad.enc = encrypt(k2, '{}', entryAad(2));
+  v2.entries = [good, bad];
+  const { newKey, droppedPolicies } = rotatePassphrase(v2, k2, 'rotated passphrase!!');
+  assert.deepEqual(droppedPolicies, ['b']);
+  assert.equal(verifyPolicy(newKey, v2.entries[0]), true);
+  assert.equal(v2.entries[1].policy, undefined);
 });
