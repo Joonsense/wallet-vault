@@ -30,22 +30,22 @@ export function materialize(e, s, idx = 0) {
  * Prepare a native send. Throws on validation errors. Returns { to, policy, preview } where policy.ok may be false
  * (caller decides: CLI may override with explicit consent, MCP never).
  */
-export async function prepareSend({ entry, key, vault, chain, to: rawTo, amount, index = 0, via = 'cli' }) {
+export async function prepareSend({ entry, key, vault, chain, to: rawTo, amount, index = 0, via = 'cli', token = null }) {
   if (!vault) throw new Error('prepareSend needs the vault');
   const log = (rec) => appendLedger(rec, key, vault);
   const to = validateRecipient(chain, rawTo);
   if (!entry.chains.includes(isSol(chain) ? 'sol' : 'evm')) throw new Error(`wallet has no ${isSol(chain) ? 'solana' : 'evm'} key`);
-  const policy = evaluate(entry, { chain, to, amount, via, key, vault });
+  const tokens = token ? await import('./tokens.mjs') : null;
+  const tk = token ? tokens.tokenKey(chain, token) : null;
+  const policy = evaluate(entry, { chain, to, amount, via, key, vault, token: tk });
   if (!policy.ok && via !== 'cli') {
-    await withLedgerLock(() => { try { log({ attempt: randomBytes(6).toString('hex'), wallet: entry.id, label: entry.label, chain, to, amount: Number(amount), via, status: 'denied', reasons: policy.reasons }); } catch {} });
-    return { to, policy, preview: null };
+    await withLedgerLock(() => { try { log({ attempt: randomBytes(6).toString('hex'), wallet: entry.id, label: entry.label, chain, token: tk, to, amount: Number(amount), via, status: 'denied', reasons: policy.reasons }); } catch {} });
+    return { to, policy, preview: null, token: tk };
   }
   const w = materialize(entry, readSecret(entry, key), index);
-  const preview = await previewSend(chain, {
-    from: isSol(chain) ? w.sol.address : w.evm.address, to, amount,
-    privateKey: w.evm?.privateKey, secretKey: w.sol?.secretKey,
-  });
-  return { to, policy, preview };
+  const args = { from: isSol(chain) ? w.sol.address : w.evm.address, to, amount, privateKey: w.evm?.privateKey, secretKey: w.sol?.secretKey };
+  const preview = token ? await tokens.previewTokenSend(chain, { ...args, spec: token }) : await previewSend(chain, args);
+  return { to, policy, preview, token: tk };
 }
 
 /**
@@ -59,11 +59,12 @@ export async function executeSend({ entry, key, vault, chain, via, preview, over
   if (!key || !vault) throw new Error('executeSend needs the vault key and vault');
   const log = (rec) => appendLedger(rec, key, vault);
   const attempt = randomBytes(6).toString('hex');
-  const base = { attempt, wallet: entry.id, label: entry.label, chain, to: preview.to, amount: Number(preview.amount), via, overridden };
+  const token = preview.tokenKey || null;
+  const base = { attempt, wallet: entry.id, label: entry.label, chain, token, to: preview.to, amount: Number(preview.amount), via, overridden };
   const { hash, send } = await preview._prepare();
   await withLedgerLock(() => {
     if (!overridden) {
-      const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via, key, vault });
+      const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via, key, vault, token });
       if (!check.ok) {
         log({ ...base, status: 'denied', reasons: check.reasons });
         const err = new Error(`policy denied at broadcast time: ${check.reasons.join('; ')}`);
@@ -94,14 +95,15 @@ export async function reconcile(records, { txStatus, key, vault }) {
     if (st === 'confirmed') after = 'sent';
     else if (st === 'reverted') after = 'failed';
     else if (st === 'notfound' && Date.now() - Date.parse(r.ts) > 48 * 3_600_000) after = 'failed'; // past any nonce/blockhash validity
-    if (after !== r.status) await withLedgerLock(() => appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st }, key, vault));
+    if (after !== r.status) await withLedgerLock(() => appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, token: r.token || null, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st }, key, vault));
     out.push({ attempt: r.attempt, hash: r.hash, chain: r.chain, before: r.status, chainStatus: st, after });
   }
   return out;
 }
 
 /** Mutate entry.policy from CLI flags. */
-export function applyPolicyFlags(entry, key, vault, { chains, perTx, perDay, agent, note, allowAdd, allowRemove, clear }) {
+export async function applyPolicyFlags(entry, key, vault, { chains, perTx, perDay, agent, note, allowAdd, allowRemove, clear, token = null }) {
+  const tokenKey = token ? (await import('./tokens.mjs')).tokenKey : null;
   if (clear) { delete entry.policy; signPolicy(key, entry); return; }
   // Never build on top of an unverified policy (it may have been edited on disk): clear first, then set fresh.
   if (entry.policy && !verifyPolicy(key, entry)) throw new Error('existing policy fails its signature; run "wv policy clear" first, then set it again');
@@ -116,9 +118,10 @@ export function applyPolicyFlags(entry, key, vault, { chains, perTx, perDay, age
     for (const c of chains) {
       if (c !== '*' && !p.chains.includes(c)) p.chains.push(c);
       if (perTx != null || perDay != null) {
-        p.limits[c] = { ...(p.limits[c] || {}) };
-        if (perTx != null) p.limits[c].perTx = perTx;
-        if (perDay != null) p.limits[c].perDay = perDay;
+        const k = token ? `${c}:${c === '*' ? token : tokenKey(c, token)}` : c;
+        p.limits[k] = { ...(p.limits[k] || {}) };
+        if (perTx != null) p.limits[k].perTx = perTx;
+        if (perDay != null) p.limits[k].perDay = perDay;
       }
     }
   } else if (perTx != null || perDay != null) {

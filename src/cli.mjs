@@ -17,8 +17,9 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv show <id|label|address> [--index N]
   wv export <id|label> (--mnemonic | --evm | --sol) [--index N] [--yes]
   wv env <id|label> [--index N]            # eval "$(wv env trader1)" -> EVM_PRIVATE_KEY, SOL_SECRET_KEY
-  wv balance <id|label> [--chain base,sol | all | testnets] [--index N] [--json]
-  wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes] [--override-policy]
+  wv balance <id|label> [--chain base,sol | all | testnets] [--token USDC|0x..|mint] [--index N] [--json]
+  wv send <id|label> --chain base --to 0x... --amount 0.01 [--token USDC] [--index N] [--dry-run] [--yes] [--override-policy]
+       tokens: USDC on eth base arb op polygon avax sol + their testnets (Circle addresses); any ERC-20 address / SPL mint works too
   wv history [<id|label>] [--limit 20]                       # local spend ledger (${'~/.wallet-vault/ledger.jsonl'})
   wv reconcile [<id|label>]                                  # settle pending/unknown ledger rows from chain state
   wv ledger verify | reset                                   # HMAC chain + head check / start a new epoch (archives the old ledger)
@@ -26,6 +27,7 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   Spend policy (bounds every send; agents via MCP cannot exceed it, CLI needs --override-policy + "override"):
   wv policy show <id|label>
   wv policy set <id|label> --chain base,sol --per-tx 0.01 --per-day 0.05 [--agent on|off] [--note ..]   # --chain "*" = default limit
+  wv policy set <id|label> --chain base --token USDC --per-tx 5 --per-day 20        # token limits are separate keys (base:USDC); '*' never covers tokens
   wv policy allow <id|label> <addr> [<addr>..]   |   wv policy deny <id|label> <addr>   |   wv policy clear <id|label>
   wv mcp                                                      # MCP server on stdio (needs WV_PASSPHRASE or WV_PASSPHRASE_CMD)
   wv faucet <id|label> --chain sol-devnet [--amount 1]      # devnet airdrop; EVM testnets print faucet URLs
@@ -61,6 +63,7 @@ const { values: opt, positionals } = parseArgs({
     to: { type: 'string' },
     amount: { type: 'string' },
     'dry-run': { type: 'boolean' },
+    token: { type: 'string' },
     testnet: { type: 'boolean' },
     name: { type: 'string' },
     days: { type: 'string' },
@@ -207,8 +210,10 @@ async function main() {
     const w = idx === 0 ? { evm: { address: e.addresses.evm }, sol: { address: e.addresses.sol } } : materialize(e, readSecret(e, key), idx);
     const rows = await Promise.all(keys.map(async k => {
       const address = isSol(k) ? w.sol.address : w.evm.address;
-      try { return { chain: k, symbol: symbolOf(k), address, balance: await nativeBalance(k, address) }; }
-      catch (x) { return { chain: k, symbol: symbolOf(k), address, error: (x.shortMessage || x.message || String(x)).split('\n')[0].slice(0, 80) }; }
+      try {
+        if (opt.token) { const { tokenBalance } = await import('./tokens.mjs'); const t = await tokenBalance(k, address, opt.token); return { chain: k, symbol: t.symbol, address, balance: t.balance, token: t.token }; }
+        return { chain: k, symbol: symbolOf(k), address, balance: await nativeBalance(k, address) };
+      } catch (x) { return { chain: k, symbol: opt.token || symbolOf(k), address, error: (x.shortMessage || x.message || String(x)).split('\n')[0].slice(0, 80) }; }
     }));
     if (opt.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     for (const r of rows) {
@@ -225,14 +230,14 @@ async function main() {
     const { vault, key } = await open();
     const e = findEntry(vault, args[0] ?? err('wallet ref required'));
     const idx = Number(opt.index);
-    const prep = await prepareSend({ entry: e, key, vault, chain: k, to: opt.to, amount: opt.amount, index: idx, via: 'cli' });
+    const prep = await prepareSend({ entry: e, key, vault, chain: k, to: opt.to, amount: opt.amount, index: idx, via: 'cli', token: opt.token || null });
     const p = prep.preview;
     warn([
       `chain    ${k}${isTestnet(k) ? '  (testnet, no real value)' : '  (MAINNET, real funds)'}`,
       `from     ${p.from}  (#${e.id} ${e.label}${idx ? ' index ' + idx : ''})`,
       `to       ${p.to}`,
-      `amount   ${p.amount} ${p.symbol}`,
-      `max fee  ${p.fee} ${p.symbol}${p.gas ? '  (gas ' + p.gas + ', nonce ' + p.nonce + ')' : ''}`,
+      `amount   ${p.amount} ${p.symbol}${p.token ? '  (token ' + p.token + ')' : ''}`,
+      `max fee  ${p.fee} ${p.feeSymbol || p.symbol}${p.gas ? '  (gas ' + p.gas + ', nonce ' + p.nonce + ')' : ''}`,
       `balance  ${p.balance} -> ${p.after} ${p.symbol}`,
       `policy   ${prep.policy.policy ? (prep.policy.ok ? 'ok' : 'DENIED') + (prep.policy.limit ? `  (per-tx ${prep.policy.limit.perTx ?? '-'}, per-day ${prep.policy.limit.perDay ?? '-'}, spent 24h ${prep.policy.spentToday})` : '') : 'none (CLI only)'}`,
       ...prep.policy.reasons.map(x => `POLICY   ${x}`),
@@ -264,7 +269,7 @@ async function main() {
     const rows = history(e?.id ?? null, Number(opt.limit || 20));
     if (opt.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     if (!rows.length) { console.log(`(empty) ${LEDGER_PATH}`); return; }
-    for (const r of rows) console.log(`${r.ts.slice(0, 19)}  #${r.wallet} ${String(r.label).padEnd(12)} ${r.chain.padEnd(12)} ${String(r.amount).padEnd(12)} ${r.status.padEnd(8)} ${r.via}${r.overridden ? ' OVERRIDE' : ''}  ${r.hash || r.error || (r.reasons || []).join('; ') || ''}`);
+    for (const r of rows) console.log(`${r.ts.slice(0, 19)}  #${r.wallet} ${String(r.label).padEnd(12)} ${(r.chain + (r.token ? ':' + r.token : '')).padEnd(18)} ${String(r.amount).padEnd(12)} ${r.status.padEnd(8)} ${r.via}${r.overridden ? ' OVERRIDE' : ''}  ${r.hash || r.error || (r.reasons || []).join('; ') || ''}`);
     return;
   }
 
@@ -305,7 +310,7 @@ async function main() {
       const chains = opt.chain === 'all' ? [] : opt.chain === '*' ? ['*'] : resolveChainKeys(opt.chain);
       const agent = opt.agent == null ? null : /^(on|true|yes|1)$/i.test(opt.agent) ? true : /^(off|false|no|0)$/i.test(opt.agent) ? false : err('--agent on|off');
       const num = (v, n) => v == null ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : err(`${n} must be a number >= 0`));
-      applyPolicyFlags(e, key, vault, { chains, perTx: num(opt['per-tx'], '--per-tx'), perDay: num(opt['per-day'], '--per-day'), agent, note: opt.note });
+      await applyPolicyFlags(e, key, vault, { chains, perTx: num(opt['per-tx'], '--per-tx'), perDay: num(opt['per-day'], '--per-day'), agent, note: opt.note, token: opt.token || null });
     } else if (sub === 'allow' || sub === 'deny') {
       const addrs = args.slice(2);
       if (!addrs.length) err('address(es) required');
@@ -315,9 +320,9 @@ async function main() {
         if (!okEvm && !okSol) err(`not an EVM or Solana address: ${a}`);
         if (okEvm) validateRecipient('eth', a);
       }
-      applyPolicyFlags(e, key, vault, sub === 'allow' ? { allowAdd: addrs } : { allowRemove: addrs });
+      await applyPolicyFlags(e, key, vault, sub === 'allow' ? { allowAdd: addrs } : { allowRemove: addrs });
     } else if (sub === 'clear') {
-      applyPolicyFlags(e, key, vault, { clear: true });
+      await applyPolicyFlags(e, key, vault, { clear: true });
     } else err(`unknown policy subcommand "${sub}"`);
     saveVaultFile(vault);
     console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}`);

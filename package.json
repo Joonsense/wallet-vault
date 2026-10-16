@@ -21,6 +21,7 @@
     "@noble/hashes": "^2.4.0",
     "@scure/base": "^2.4.0",
     "@scure/bip39": "^2.4.0",
+    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.99.0",
     "micro-key-producer": "^0.10.2",
     "viem": "^2.57.7",

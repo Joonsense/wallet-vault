@@ -16,7 +16,9 @@ export function emptyPolicy() {
   return { chains: [], allow: [], limits: {}, agent: false, note: '' };
 }
 
-export function limitFor(policy, chain) {
+/** Native: limits[chain] || limits['*']. Token: limits[`chain:TOKEN`] || limits[`*:TOKEN`] (never the native wildcard). */
+export function limitFor(policy, chain, token = null) {
+  if (token) return policy.limits?.[`${chain}:${token}`] || policy.limits?.[`*:${token}`] || null;
   return policy.limits?.[chain] || policy.limits?.['*'] || null;
 }
 
@@ -29,7 +31,7 @@ function sameAddr(a, b, chain) {
  * `via` is 'cli' or 'mcp'. Without a policy a human on the CLI may proceed (they confirm interactively),
  * an agent may not.
  */
-export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now(), key, vault }) {
+export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now(), key, vault, token = null }) {
   const reasons = [];
   const p = entry.policy;
   const amt = Number(amount);
@@ -45,14 +47,14 @@ export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now
   if (!p.chains?.length) reasons.push('policy allows no chains');
   else if (!p.chains.includes(chain)) reasons.push(`chain ${chain} not in policy chains [${p.chains.join(', ')}]`);
   if (p.allow?.length && !p.allow.some(a => sameAddr(a, to, chain))) reasons.push(`recipient ${to} not in allowlist`);
-  const limit = limitFor(p, chain);
-  if (!limit) reasons.push(`no limit set for ${chain} (set --per-tx/--per-day for it or for '*')`);
+  const limit = limitFor(p, chain, token);
+  if (!limit) reasons.push(token ? `no limit set for ${token} on ${chain} (wv policy set .. --chain ${chain} --token ${token} --per-tx X --per-day Y)` : `no limit set for ${chain} (set --per-tx/--per-day for it or for '*')`);
   let spentToday = 0;
   if (limit) {
     if (!(amt > 0)) reasons.push('amount must be > 0');
     if (limit.perTx != null && amt > limit.perTx) reasons.push(`amount ${amt} exceeds per-tx limit ${limit.perTx}`);
     if (limit.perDay != null) {
-      spentToday = spentInWindow(entry.id, chain, 86_400_000, now, ledger.records.filter(r => !r._corrupt));
+      spentToday = spentInWindow(entry.id, chain, 86_400_000, now, ledger.records.filter(r => !r._corrupt), token);
       if (spentToday + amt > limit.perDay) reasons.push(`daily limit ${limit.perDay}: already ${spentToday} in the last 24h, +${amt} exceeds it`);
     }
   }
@@ -61,7 +63,7 @@ export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now
 
 export function describePolicy(p) {
   if (!p) return '(no policy: CLI sends allowed with confirmation, agent sends denied)';
-  const lim = Object.entries(p.limits || {}).map(([k, v]) => `${k}: per-tx ${v.perTx ?? '-'} / per-day ${v.perDay ?? '-'}`);
+  const lim = Object.entries(p.limits || {}).map(([k, v]) => `${k}: per-tx ${v.perTx ?? '-'} / per-day ${v.perDay ?? '-'}`);  // 'base' = native, 'base:USDC' = token
   return [
     `agent    ${p.agent ? 'ENABLED (exposed via MCP)' : 'off'}`,
     `chains   ${p.chains?.length ? p.chains.join(', ') : '(none)'}`,

@@ -102,3 +102,19 @@ test('missing/forged ledger metadata fails closed; rotation drops tampered polic
   assert.equal(verifyPolicy(newKey, v2.entries[0]), true);
   assert.equal(v2.entries[1].policy, undefined);
 });
+
+test('token limits are separate keys; native wildcard never covers tokens; budgets are per token', async () => {
+  const { resetLedgerEpoch } = await import('../src/ledger.mjs');
+  resetLedgerEpoch(key, vault, emptyVault().ledgerEpoch);   // earlier tests deliberately wrecked the ledger
+  const e = signed({ ...base, id: 20, policy: { chains: ['base'], allow: [], limits: { base: { perTx: 1, perDay: 2 }, '*': { perTx: 1, perDay: 2 } }, agent: true } });
+  const r = evaluate(e, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.5, via: 'mcp', key, vault, token: 'USDC' });
+  assert.match(r.reasons.join(), /no limit set for USDC on base/);
+  const e2 = signed({ ...base, id: 21, policy: { chains: ['base'], allow: [], limits: { 'base:USDC': { perTx: 5, perDay: 10 } }, agent: true } });
+  assert.equal(evaluate(e2, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 5, via: 'mcp', key, vault, token: 'USDC' }).ok, true);
+  assert.match(evaluate(e2, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 5.01, via: 'mcp', key, vault, token: 'USDC' }).reasons.join(), /per-tx/);
+  assert.match(evaluate(e2, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 0.001, via: 'mcp', key, vault }).reasons.join(), /no limit set for base/);
+  appendLedger({ attempt: 't1', wallet: 21, chain: 'base', token: 'USDC', amount: 8, status: 'sent' }, key, vault);
+  appendLedger({ attempt: 't2', wallet: 21, chain: 'base', amount: 100, status: 'sent' }, key, vault);   // native spend must not count against USDC
+  assert.equal(spentInWindow(21, 'base', 86_400_000, Date.now(), undefined, 'USDC'), 8);
+  assert.match(evaluate(e2, { chain: 'base', to: '0x000000000000000000000000000000000000dead', amount: 3, via: 'mcp', key, vault, token: 'USDC' }).reasons.join(), /daily limit 10/);
+});

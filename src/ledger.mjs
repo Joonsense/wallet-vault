@@ -75,10 +75,10 @@ export function resolvedAttempts(records) {
 }
 
 /** Budget use in the last windowMs: everything except verified failed/denied (sent, pending, unknown all count). */
-export function spentInWindow(walletId, chain, windowMs = 86_400_000, now = Date.now(), records = readLedger()) {
+export function spentInWindow(walletId, chain, windowMs = 86_400_000, now = Date.now(), records = readLedger(), token = null) {
   const since = now - windowMs;
   return resolvedAttempts(records)
-    .filter(r => r.wallet === walletId && r.chain === chain && r.status !== 'failed' && r.status !== 'denied' && Date.parse(r.ts) >= since)
+    .filter(r => r.wallet === walletId && r.chain === chain && (r.token || null) === token && r.status !== 'failed' && r.status !== 'denied' && Date.parse(r.ts) >= since)
     .reduce((s, r) => s + Number(r.amount || 0), 0);
 }
 

@@ -58,16 +58,18 @@ export async function startMcp() {
   }, async ({ wallet }) => { try { const e = pick(wallet); return text(describePolicy(e.policy)); } catch (x) { return fail(x.message); } });
 
   server.registerTool('get_balance', {
-    description: `Native token balance of a wallet on one or more chains. Chains: ${ALL_KEYS.join(', ')} (or "all" for mainnets, "testnets").`,
-    inputSchema: { wallet: z.string(), chain: z.string().default('all').describe('comma separated chain keys, "all" or "testnets"') },
-  }, async ({ wallet, chain }) => {
+    description: `Balance of a wallet on one or more chains: native coin, or a token when "token" is given (USDC by symbol, or an ERC-20 address / SPL mint). Chains: ${ALL_KEYS.join(', ')} (or "all" for mainnets, "testnets").`,
+    inputSchema: { wallet: z.string(), chain: z.string().default('all').describe('comma separated chain keys, "all" or "testnets"'), token: z.string().optional().describe('e.g. "USDC"; omit for the native coin') },
+  }, async ({ wallet, chain, token }) => {
     try {
       const e = pick(wallet);
       const keys = resolveChainKeys(chain === 'all' ? null : chain).filter(k => (isSol(k) ? e.addresses.sol : e.addresses.evm));
       const rows = await Promise.all(keys.map(async k => {
         const address = isSol(k) ? e.addresses.sol : e.addresses.evm;
-        try { return { chain: k, symbol: symbolOf(k), address, balance: await nativeBalance(k, address) }; }
-        catch (x) { return { chain: k, symbol: symbolOf(k), address, error: (x.shortMessage || x.message).split('\n')[0].slice(0, 100) }; }
+        try {
+          if (token) { const { tokenBalance } = await import('./tokens.mjs'); const t = await tokenBalance(k, address, token); return { chain: k, symbol: t.symbol, token: t.token, address, balance: t.balance }; }
+          return { chain: k, symbol: symbolOf(k), address, balance: await nativeBalance(k, address) };
+        } catch (x) { return { chain: k, symbol: token || symbolOf(k), address, error: (x.shortMessage || x.message).split('\n')[0].slice(0, 100) }; }
       }));
       return text(rows);
     } catch (x) { return fail(x.message); }
@@ -78,29 +80,40 @@ export async function startMcp() {
     inputSchema: { wallet: z.string(), limit: z.number().int().min(1).max(200).default(20) },
   }, async ({ wallet, limit }) => { try { const e = pick(wallet); return text(history(e.id, limit)); } catch (x) { return fail(x.message); } });
 
-  server.registerTool('send_native', {
-    description: 'Send native token (ETH/BNB/POL/AVAX/SOL) from an agent-enabled wallet. Enforces the owner policy: chain allowlist, recipient allowlist, per-tx and 24h limits. Use dry_run=true first to see fee and balance effect. Returns tx hash and explorer link.',
-    inputSchema: {
-      wallet: z.string(), chain: z.string().describe('one chain key, e.g. base, arb, sol, base-sepolia, sol-devnet'),
-      to: z.string().describe('recipient address'), amount: z.string().describe('decimal amount in native units, e.g. "0.01"'),
-      dry_run: z.boolean().default(false),
-    },
-  }, async ({ wallet, chain, to, amount, dry_run }) => {
+  const sendHandler = (forcedToken) => async ({ wallet, chain, to, amount, dry_run, token }) => {
     try {
       const e = pick(wallet);
       const [k] = resolveChainKeys(chain);
       if (resolveChainKeys(chain).length !== 1) return fail('exactly one chain');
-      const prep = await prepareSend({ entry: e, key, vault, chain: k, to, amount, via: 'mcp' });
+      const tok = forcedToken === undefined ? (token || null) : forcedToken;
+      const prep = await prepareSend({ entry: e, key, vault, chain: k, to, amount, via: 'mcp', token: tok });
       if (!prep.policy.ok) return fail({ denied: true, reasons: prep.policy.reasons });
       const p = prep.preview;
-      const summary = { chain: k, from: p.from, to: p.to, amount: p.amount, symbol: p.symbol, max_fee: p.fee, balance_before: p.balance, balance_after: p.after, warnings: p.warnings, spent_last_24h: prep.policy.spentToday, limit: prep.policy.limit };
+      const summary = { chain: k, token: p.token || null, from: p.from, to: p.to, amount: p.amount, symbol: p.symbol, max_fee: p.fee, fee_symbol: p.feeSymbol || p.symbol, balance_before: p.balance, balance_after: p.after, warnings: p.warnings, spent_last_24h: prep.policy.spentToday, limit: prep.policy.limit };
       if (p.warnings.some(w => w.startsWith('insufficient'))) return fail({ ...summary, error: 'insufficient balance' });
       if (dry_run) return text({ dry_run: true, ...summary });
       const result = await executeSend({ entry: e, key, vault, chain: k, via: 'mcp', preview: p });
       const hash = String(result).split(' ')[0];
       return text({ ...summary, result, explorer: explorerTx(k, hash) });
     } catch (x) { return fail(x.shortMessage || x.message || String(x)); }
-  });
+  };
+
+  server.registerTool('send_native', {
+    description: 'Send the native coin (ETH/BNB/POL/AVAX/SOL) from an agent-enabled wallet. Enforces the owner policy: chain allowlist, recipient allowlist, per-tx and 24h limits. Use dry_run=true first to see fee and balance effect. Returns tx hash and explorer link.',
+    inputSchema: {
+      wallet: z.string(), chain: z.string().describe('one chain key, e.g. base, arb, sol, base-sepolia, sol-devnet'),
+      to: z.string().describe('recipient address'), amount: z.string().describe('decimal amount in native units, e.g. "0.01"'),
+      dry_run: z.boolean().default(false),
+    },
+  }, sendHandler(null));
+
+  server.registerTool('send_token', {
+    description: 'Send an ERC-20 or SPL token (e.g. USDC) from an agent-enabled wallet. Token limits are separate policy keys (chain:TOKEN) the owner must set; the native wildcard never applies. Gas/fees are paid in the native coin. dry_run=true to preview.',
+    inputSchema: {
+      wallet: z.string(), chain: z.string().describe('one chain key'), token: z.string().describe('"USDC", or an ERC-20 contract address / SPL mint'),
+      to: z.string(), amount: z.string().describe('decimal amount in token units, e.g. "5"'), dry_run: z.boolean().default(false),
+    },
+  }, sendHandler(undefined));
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

@@ -61,7 +61,19 @@ wv send test1 --chain sol-devnet --to <addr> --amount 0.1
 - 보내기 전 수수료(EVM maxFee × gas, SOL getFeeForMessage)·잔고 변화·경고를 보여주고, 잔고 부족이면 브로드캐스트 전에 중단.
 - 수신자가 컨트랙트면 경고, Solana 새 계정이면 rent exempt 최소액 미만 경고.
 - `--dry-run` 은 서명·전송 없이 미리보기만. `--yes` 없이는 "send" 를 타이핑해야 나간다.
-- 네이티브 토큰만. ERC-20·SPL 토큰 전송은 없다.
+- 네이티브와 토큰(ERC-20·SPL) 전송. 토큰 가스는 네이티브로 내므로 두 잔고를 모두 검사한다.
+
+## 토큰 (USDC 등)
+
+```bash
+wv balance test1 --chain base,sol --token USDC
+wv send test1 --chain base --to 0x... --amount 5 --token USDC          # 가스는 ETH, 금액은 USDC
+wv send test1 --chain sol --to <addr> --amount 5 --token USDC          # 수신자 ATA 없으면 생성(rent 는 보내는 쪽 부담) 경고 후 포함
+wv balance test1 --chain base --token 0x8335...2913                   # 임의 ERC-20 주소 / SPL mint 도 가능
+wv policy set test1 --chain base --token USDC --per-tx 5 --per-day 20 # 토큰 한도는 별도 키 base:USDC
+```
+
+USDC 주소는 Circle 공식 문서(developers.circle.com/stablecoins/usdc-contract-addresses, 2026-10-16 확인) 값이다. BNB Chain 의 USDC 는 Circle 발행이 아니라 등록하지 않았다. 토큰 한도는 네이티브 와일드카드 `*` 의 적용을 받지 않으며, 토큰별 24시간 예산도 네이티브와 분리해 센다. MCP 에는 `send_token` 도구와 `get_balance` 의 `token` 인자로 노출된다.
 
 ## 지출 정책 + 원장
 
@@ -114,6 +126,7 @@ wv history bot                                                    # ~/.wallet-va
 | get_balance | 네이티브 잔고 (체인 목록, all, testnets) |
 | spend_history | 최근 시도 (sent·failed·denied) |
 | send_native | 정책 검사 → 미리보기(dry_run) 또는 브로드캐스트. 거부되면 사유와 함께 isError, 원장에 denied 기록 |
+| send_token | 위와 같되 ERC-20·SPL 토큰. 한도 키는 chain:TOKEN, 소유자가 명시적으로 설정해야 함 |
 
 stdio 에는 프롬프트가 없으므로 암호는 `WV_PASSPHRASE` 또는 `WV_PASSPHRASE_CMD` 로 준다. macOS 는 키체인이 낫다.
 
