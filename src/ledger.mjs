@@ -145,10 +145,9 @@ export function withLedgerLock(fn) {
   return run;
 }
 
-/** Re-MAC the whole ledger under a new key (passphrase rotation). Caller verified it under the old key and holds the lock. */
-export function rewriteLedger(oldKey, newKey, vault) {
-  const v = verifyLedger(oldKey, vault);
-  if (!v.ok) throw new Error(`refusing to rotate: ledger fails verification (${v.reason})`);
+/** Re-MAC the whole ledger under a new key (passphrase rotation). `v` is verifyLedger(oldKey, vault) taken BEFORE rotating; caller holds the lock. */
+export function rewriteLedger(newKey, vault, v) {
+  if (!v?.ok) throw new Error(`refusing to rotate: ledger fails verification (${v?.reason})`);
   const sub = macKey(newKey, 'ledger');
   let prev = genesisFor(vault);
   const lines = [];

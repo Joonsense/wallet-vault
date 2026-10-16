@@ -474,11 +474,11 @@ async function main() {
     const next = await hiddenPrompt('New passphrase: ');
     if (next !== await hiddenPrompt('Confirm new passphrase: ')) err('passphrases do not match');
     if (!existsVaultChanged(vault, key, next)) err('new passphrase must differ from the current one');
-    const lv = verifyLedger(key, vault);
-    if (!lv.ok) err(`refusing to rotate while the ledger fails verification: ${lv.reason}`);
     await withLedgerLock(() => {
+      const lv = verifyLedger(key, vault);   // under the lock, before anything changes
+      if (!lv.ok) err(`refusing to rotate while the ledger fails verification: ${lv.reason}`);
       const { newKey, droppedPolicies } = rotatePassphrase(vault, key, next);
-      rewriteLedger(key, newKey, vault);
+      rewriteLedger(newKey, vault, lv);
       saveVaultFile(vault);
       warn(`passphrase rotated, all entries re-encrypted, ledger re-signed${droppedPolicies.length ? `; DROPPED unverifiable policies on: ${droppedPolicies.join(', ')}` : ''}`);
     });
