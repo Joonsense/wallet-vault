@@ -73,6 +73,8 @@ wv balance test1 --chain base --token 0x8335...2913                   # 임의 E
 wv policy set test1 --chain base --token USDC --per-tx 5 --per-day 20 # 토큰 한도는 별도 키 base:USDC
 ```
 
+Solana 에서 수신자의 토큰계좌가 없으면 rent(약 0.0015 SOL)를 보내는 쪽이 내는데, 이건 제3자에게 나가는 네이티브 지출이라 네이티브 한도로도 심사하고 원장에 `<attempt>-rent` 행으로 따로 센다. 네이티브 한도가 없는 지갑은 새 수신자에게 SPL 토큰을 보낼 수 없다.
+
 USDC 주소는 Circle 공식 문서(developers.circle.com/stablecoins/usdc-contract-addresses, 2026-10-16 확인) 값이다. BNB Chain 의 USDC 는 Circle 발행이 아니라 등록하지 않았다. 토큰 한도는 네이티브 와일드카드 `*` 의 적용을 받지 않으며, 토큰별 24시간 예산도 네이티브와 분리해 센다. MCP 에는 `send_token` 도구와 `get_balance` 의 `token` 인자로 노출된다.
 
 ## 지출 정책 + 원장
