@@ -29,13 +29,13 @@ function sameAddr(a, b, chain) {
  * `via` is 'cli' or 'mcp'. Without a policy a human on the CLI may proceed (they confirm interactively),
  * an agent may not.
  */
-export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now(), key }) {
+export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now(), key, vault }) {
   const reasons = [];
   const p = entry.policy;
   const amt = Number(amount);
-  if (!key) throw new Error('evaluate needs the vault key');
-  if (!verifyPolicy(key, entry)) reasons.push('policy signature invalid: vault.json was edited outside wv (re-save with wv policy set, or wv policy clear)');
-  const ledger = verifyLedger(key);
+  if (!key || !vault) throw new Error('evaluate needs the vault key and vault');
+  if (!verifyPolicy(key, entry, vault)) reasons.push('policy signature invalid: vault.json was edited outside wv (re-save with wv policy set, or wv policy clear)');
+  const ledger = verifyLedger(key, vault);
   if (!ledger.ok) reasons.push(`ledger integrity failure: ${ledger.reason}`);
   if (!p) {
     if (via !== 'cli') reasons.push('wallet has no spend policy; agent access requires one (wv policy set ...)');

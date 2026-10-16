@@ -31,7 +31,7 @@ export async function startMcp() {
   };
   const agentWallets = () => fresh().entries.filter(e => {
     if (!e.policy?.agent) return false;
-    if (!verifyPolicy(key, e)) { process.stderr.write(`wallet-vault: policy MAC invalid on #${e.id} ${e.label}; hidden from agents\n`); return false; }
+    if (!verifyPolicy(key, e, vault)) { process.stderr.write(`wallet-vault: policy MAC invalid on #${e.id} ${e.label}; hidden from agents\n`); return false; }
     return true;
   });
   const pick = (ref) => {
@@ -89,13 +89,13 @@ export async function startMcp() {
       const e = pick(wallet);
       const [k] = resolveChainKeys(chain);
       if (resolveChainKeys(chain).length !== 1) return fail('exactly one chain');
-      const prep = await prepareSend({ entry: e, key, chain: k, to, amount, via: 'mcp' });
+      const prep = await prepareSend({ entry: e, key, vault, chain: k, to, amount, via: 'mcp' });
       if (!prep.policy.ok) return fail({ denied: true, reasons: prep.policy.reasons });
       const p = prep.preview;
       const summary = { chain: k, from: p.from, to: p.to, amount: p.amount, symbol: p.symbol, max_fee: p.fee, balance_before: p.balance, balance_after: p.after, warnings: p.warnings, spent_last_24h: prep.policy.spentToday, limit: prep.policy.limit };
       if (p.warnings.some(w => w.startsWith('insufficient'))) return fail({ ...summary, error: 'insufficient balance' });
       if (dry_run) return text({ dry_run: true, ...summary });
-      const result = await executeSend({ entry: e, key, chain: k, via: 'mcp', preview: p });
+      const result = await executeSend({ entry: e, key, vault, chain: k, via: 'mcp', preview: p });
       const hash = String(result).split(' ')[0];
       return text({ ...summary, result, explorer: explorerTx(k, hash) });
     } catch (x) { return fail(x.shortMessage || x.message || String(x)); }

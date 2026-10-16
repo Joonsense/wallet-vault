@@ -8,13 +8,13 @@ import { DEFAULT_VAULT_PATH, macKey, hmacHex, stableStringify } from './vault.mj
 
 export const LEDGER_PATH = process.env.WV_LEDGER || join(dirname(DEFAULT_VAULT_PATH), 'ledger.jsonl');
 const HEAD_PATH = `${LEDGER_PATH}.head`;
-const GENESIS = 'genesis';
+const genesisFor = (vault) => `genesis:${vault.ledgerEpoch}`;
 
 function recordMac(subkey, prevMac, rec) {
   const { mac, ...body } = rec;
   return hmacHex(subkey, prevMac + '\n' + stableStringify(body));
 }
-function headSig(subkey, count, mac) { return hmacHex(subkey, `head:${count}:${mac}`); }
+function headSig(subkey, vault, count, mac) { return hmacHex(subkey, `head:${vault.ledgerEpoch}:${count}:${mac}`); }
 function eq(a, b) { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); }
 
 function rawRecords() {
@@ -26,12 +26,13 @@ function readHead() {
   try { return JSON.parse(readFileSync(HEAD_PATH, 'utf8')); } catch { return { _corrupt: true }; }
 }
 
-/** Verify chain + head. Returns { ok, reason, records, count, head }. Records are returned even when !ok. */
-export function verifyLedger(key) {
+/** Verify chain + head against this vault's epoch. Returns { ok, reason, records, count, head }. */
+export function verifyLedger(key, vault) {
+  if (!vault?.ledgerEpoch) return { ok: false, reason: 'vault has no ledger epoch', records: [], count: 0, head: null };
   const sub = macKey(key, 'ledger');
   const records = rawRecords();
   const head = readHead();
-  let prev = GENESIS;
+  let prev = genesisFor(vault);
   for (let i = 0; i < records.length; i++) {
     const r = records[i];
     if (r._corrupt) return { ok: false, reason: `line ${i + 1} is not JSON`, records, count: records.length, head };
@@ -39,28 +40,37 @@ export function verifyLedger(key) {
     prev = r.mac;
   }
   if (!head) {
-    if (records.length === 0) return { ok: true, reason: null, records, count: 0, head: null };
+    // No head at all: only acceptable while the ledger has never been written in this epoch.
+    if (records.length === 0 && !existsSync(LEDGER_PATH)) return { ok: !vault.ledgerStarted, reason: vault.ledgerStarted ? 'ledger files deleted (vault says this epoch has a ledger)' : null, records, count: 0, head: null };
     return { ok: false, reason: 'ledger has records but ledger.head is missing', records, count: records.length, head };
   }
-  if (head._corrupt || !eq(headSig(sub, head.count, head.mac), head.sig)) return { ok: false, reason: 'ledger.head signature invalid', records, count: records.length, head };
+  if (head._corrupt || !eq(headSig(sub, vault, head.count, head.mac), head.sig)) return { ok: false, reason: 'ledger.head signature invalid (wrong vault epoch or edited)', records, count: records.length, head };
   if (head.count !== records.length || !eq(head.mac, prev)) return { ok: false, reason: `ledger truncated or edited (head says ${head.count} records, file has ${records.length})`, records, count: records.length, head };
   return { ok: true, reason: null, records, count: records.length, head };
 }
 
-/** Append one record (call under the ledger lock). Refuses to extend a ledger that fails verification. */
-export function appendLedger(rec, key) {
-  if (!key) throw new Error('appendLedger needs the vault key');
+/**
+ * Append one record (call under the ledger lock). Refuses to extend a ledger that fails verification.
+ * First write of an epoch marks the vault (ledgerStarted, signed into every policy MAC via re-sign) so deleting the
+ * ledger files later is detected. The marker is written through `markStarted(vault)` supplied by the caller.
+ */
+export function appendLedger(rec, key, vault, markStarted) {
+  if (!key || !vault) throw new Error('appendLedger needs the vault key and vault');
   const sub = macKey(key, 'ledger');
-  const v = verifyLedger(key);
+  const v = verifyLedger(key, vault);
   if (!v.ok) throw new Error(`ledger integrity failure: ${v.reason} (inspect ${LEDGER_PATH}; wv ledger verify)`);
-  const prev = v.count ? v.records[v.count - 1].mac : GENESIS;
+  if (!vault.ledgerStarted) {
+    if (typeof markStarted !== 'function') throw new Error('first ledger write needs markStarted');
+    markStarted(vault); // sets vault.ledgerStarted = true, re-signs policies, saves vault.json
+  }
+  const prev = v.count ? v.records[v.count - 1].mac : genesisFor(vault);
   const body = { ts: new Date().toISOString(), ...rec };
   const mac = recordMac(sub, prev, body);
   mkdirSync(dirname(LEDGER_PATH), { recursive: true, mode: 0o700 });
   appendFileSync(LEDGER_PATH, JSON.stringify({ ...body, mac }) + '\n', { mode: 0o600 });
   const count = v.count + 1;
   const tmp = `${HEAD_PATH}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify({ count, mac, sig: headSig(sub, count, mac) }), { mode: 0o600 });
+  writeFileSync(tmp, JSON.stringify({ count, mac, sig: headSig(sub, vault, count, mac) }), { mode: 0o600 });
   renameSync(tmp, HEAD_PATH);
   try { chmodSync(LEDGER_PATH, 0o600); } catch {}
 }

@@ -23,15 +23,17 @@ export function deriveKey(passphrase, saltB64, kdf = KDF) {
   });
 }
 
-export function encrypt(key, plaintext) {
+export function encrypt(key, plaintext, aad = '') {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
+  if (aad) cipher.setAAD(Buffer.from(aad, 'utf8'));
   const ct = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
   return { iv: b64(iv), tag: b64(cipher.getAuthTag()), ct: b64(ct) };
 }
 
-export function decrypt(key, box) {
+export function decrypt(key, box, aad = '') {
   const decipher = createDecipheriv('aes-256-gcm', key, unb64(box.iv));
+  if (aad) decipher.setAAD(Buffer.from(aad, 'utf8'));
   decipher.setAuthTag(unb64(box.tag));
   return Buffer.concat([decipher.update(unb64(box.ct)), decipher.final()]).toString('utf8');
 }
@@ -42,6 +44,7 @@ export function emptyVault() {
     createdAt: new Date().toISOString(),
     kdf: { ...KDF, salt: b64(randomBytes(32)) },
     check: null,       // encrypted CHECK_PLAINTEXT, used to verify the passphrase quickly
+    ledgerEpoch: b64(randomBytes(32)),  // binds ledger + policy MACs to this vault instance; a ledger from elsewhere or none at all fails
     nextId: 1,
     entries: [],
   };
@@ -88,6 +91,10 @@ export function openVault(passphrase, path = DEFAULT_VAULT_PATH) {
     vault.check = encrypt(key, CHECK_PLAINTEXT);
     saveVaultFile(vault, path);
   }
+  if (!vault.ledgerEpoch) {
+    vault.ledgerEpoch = b64(randomBytes(32));
+    saveVaultFile(vault, path);
+  }
   return { vault, key, path, created };
 }
 
@@ -111,14 +118,15 @@ export function addEntry(vault, key, { label, chains, addresses, secret, note })
     addresses,
     note: note || '',
     createdAt: new Date().toISOString(),
-    enc: encrypt(key, JSON.stringify(secret)),
+    enc: encrypt(key, JSON.stringify(secret), entryAad(vault.nextId - 1)),
   };
   vault.entries.push(entry);
   return entry;
 }
 
+export const entryAad = (id) => `wallet-vault:entry:${id}`;
 export function readSecret(entry, key) {
-  return JSON.parse(decrypt(key, entry.enc));
+  return JSON.parse(decrypt(key, entry.enc, entryAad(entry.id)));
 }
 
 export function removeEntry(vault, entry) {
@@ -129,9 +137,11 @@ export function removeEntry(vault, entry) {
 export function rotatePassphrase(vault, oldKey, newPassphrase) {
   const fresh = emptyVault();
   const newKey = deriveKey(newPassphrase, fresh.kdf.salt, fresh.kdf);
-  vault.entries = vault.entries.map(e => ({ ...e, enc: encrypt(newKey, decrypt(oldKey, e.enc)) }));
+  vault.entries = vault.entries.map(e => ({ ...e, enc: encrypt(newKey, decrypt(oldKey, e.enc, entryAad(e.id)), entryAad(e.id)) }));
   vault.kdf = fresh.kdf;
   vault.check = encrypt(newKey, CHECK_PLAINTEXT);
+  // policies were signed with the old key: re-sign them
+  for (const e of vault.entries) signPolicy(newKey, e, vault);
   return newKey;
 }
 
@@ -149,14 +159,25 @@ export function stableStringify(v) {
 export function hmacHex(subkey, data) {
   return createHmac('sha256', subkey).update(data).digest('hex');
 }
-export function signPolicy(key, entry) {
-  if (!entry.policy) { delete entry.policyMac; return; }
-  entry.policyMac = hmacHex(macKey(key, 'policy'), stableStringify({ id: entry.id, policy: entry.policy }));
+function policyBinding(entry, vault) {
+  return stableStringify({ id: entry.id, chains: entry.chains, addresses: entry.addresses, enc: entry.enc, policy: entry.policy, epoch: vault?.ledgerEpoch ?? null, started: !!vault?.ledgerStarted });
 }
-export function verifyPolicy(key, entry) {
+export function signPolicy(key, entry, vault) {
+  if (!entry.policy) { delete entry.policyMac; return; }
+  if (!vault) throw new Error('signPolicy needs the vault (ledger epoch)');
+  entry.policyMac = hmacHex(macKey(key, 'policy'), policyBinding(entry, vault));
+}
+export function verifyPolicy(key, entry, vault) {
   if (!entry.policy) return !entry.policyMac;
-  if (!entry.policyMac) return false;
-  const want = hmacHex(macKey(key, 'policy'), stableStringify({ id: entry.id, policy: entry.policy }));
+  if (!entry.policyMac || !vault) return false;
+  const want = hmacHex(macKey(key, 'policy'), policyBinding(entry, vault));
   const a = Buffer.from(want, 'hex'), b = Buffer.from(String(entry.policyMac), 'hex');
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** First ledger write of an epoch: flag the vault and re-sign every policy so the flag cannot be removed unnoticed. */
+export function markLedgerStarted(key, vault, path = DEFAULT_VAULT_PATH) {
+  vault.ledgerStarted = true;
+  for (const e of vault.entries) if (e.policy) signPolicy(key, e, vault);
+  saveVaultFile(vault, path);
 }

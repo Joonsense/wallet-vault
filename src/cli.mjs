@@ -225,7 +225,7 @@ async function main() {
     const { vault, key } = await open();
     const e = findEntry(vault, args[0] ?? err('wallet ref required'));
     const idx = Number(opt.index);
-    const prep = await prepareSend({ entry: e, key, chain: k, to: opt.to, amount: opt.amount, index: idx, via: 'cli' });
+    const prep = await prepareSend({ entry: e, key, vault, chain: k, to: opt.to, amount: opt.amount, index: idx, via: 'cli' });
     const p = prep.preview;
     warn([
       `chain    ${k}${isTestnet(k) ? '  (testnet, no real value)' : '  (MAINNET, real funds)'}`,
@@ -251,7 +251,7 @@ async function main() {
       const a = await visiblePrompt(`Send ${p.amount} ${p.symbol} on ${k} to ${p.to}? type "send" to broadcast: `);
       if (a !== 'send') err('aborted');
     }
-    const result = await executeSend({ entry: e, key, chain: k, via: 'cli', preview: p, overridden });
+    const result = await executeSend({ entry: e, key, vault, chain: k, via: 'cli', preview: p, overridden });
     const hash = String(result).split(' ')[0];
     console.log(result);
     warn(explorerTx(k, hash));
@@ -269,8 +269,8 @@ async function main() {
   }
 
   if (cmd === 'ledger') {
-    const { key } = await open();
-    const v = verifyLedger(key);
+    const { key, vault } = await open();
+    const v = verifyLedger(key, vault);
     console.log(v.ok ? `ok: ${v.count} records, head matches (${LEDGER_PATH})` : `FAIL: ${v.reason}`);
     if (!v.ok) process.exit(2);
     return;
@@ -279,7 +279,7 @@ async function main() {
   if (cmd === 'reconcile') {
     const { vault, key } = await open();
     const e = args[0] ? findEntry(vault, args[0]) : null;
-    const rows = await reconcile(history(e?.id ?? null, 500), { txStatus, key });
+    const rows = await reconcile(history(e?.id ?? null, 500), { txStatus, key, vault });
     if (!rows.length) { console.log('nothing pending or unknown'); return; }
     for (const r of rows) console.log(`${r.chain.padEnd(12)} ${r.hash}  ${r.before} -> ${r.after}  (chain: ${r.chainStatus})`);
     return;
@@ -289,12 +289,12 @@ async function main() {
     const sub = args[0] ?? err('policy subcommand: show | set | allow | deny | clear');
     const { vault, key } = await open();
     const e = findEntry(vault, args[1] ?? err('wallet ref required'));
-    if (sub === 'show') { console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}${e.policy && !verifyPolicy(key, e) ? '\nWARNING  policy signature INVALID (edited outside wv); agents will not see this wallet until re-saved' : ''}`); return; }
+    if (sub === 'show') { console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}${e.policy && !verifyPolicy(key, e, vault) ? '\nWARNING  policy signature INVALID (edited outside wv); agents will not see this wallet until re-saved' : ''}`); return; }
     if (sub === 'set') {
       const chains = opt.chain === 'all' ? [] : opt.chain === '*' ? ['*'] : resolveChainKeys(opt.chain);
       const agent = opt.agent == null ? null : /^(on|true|yes|1)$/i.test(opt.agent) ? true : /^(off|false|no|0)$/i.test(opt.agent) ? false : err('--agent on|off');
       const num = (v, n) => v == null ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : err(`${n} must be a number >= 0`));
-      applyPolicyFlags(e, key, { chains, perTx: num(opt['per-tx'], '--per-tx'), perDay: num(opt['per-day'], '--per-day'), agent, note: opt.note });
+      applyPolicyFlags(e, key, vault, { chains, perTx: num(opt['per-tx'], '--per-tx'), perDay: num(opt['per-day'], '--per-day'), agent, note: opt.note });
     } else if (sub === 'allow' || sub === 'deny') {
       const addrs = args.slice(2);
       if (!addrs.length) err('address(es) required');
@@ -304,9 +304,9 @@ async function main() {
         if (!okEvm && !okSol) err(`not an EVM or Solana address: ${a}`);
         if (okEvm) validateRecipient('eth', a);
       }
-      applyPolicyFlags(e, key, sub === 'allow' ? { allowAdd: addrs } : { allowRemove: addrs });
+      applyPolicyFlags(e, key, vault, sub === 'allow' ? { allowAdd: addrs } : { allowRemove: addrs });
     } else if (sub === 'clear') {
-      applyPolicyFlags(e, key, { clear: true });
+      applyPolicyFlags(e, key, vault, { clear: true });
     } else err(`unknown policy subcommand "${sub}"`);
     saveVaultFile(vault);
     console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}`);
