@@ -40,12 +40,15 @@ export async function prepareSend({ entry, key, chain, to: rawTo, amount, index 
 
 /**
  * Broadcast a prepared send with ledger bookkeeping. Returns the chain result string (hash ...).
- * The policy is re-evaluated and the pending reservation written inside one ledger lock, so two concurrent sends
- * (two MCP calls, or CLI + MCP) cannot both pass the daily limit. The earlier evaluate() in prepareSend is advisory.
+ * 1. sign locally (hash known, nothing broadcast yet; an error here reserves nothing)
+ * 2. under the ledger lock: re-evaluate policy, write 'pending' with the hash  (atomic check-and-reserve)
+ * 3. broadcast + confirm. Success -> 'sent'. Any error after this point -> 'unknown' (still counted against the
+ *    budget, because the tx may be on chain); `wv reconcile` later settles it from chain state.
  */
 export async function executeSend({ entry, chain, via, preview, overridden = false }) {
   const attempt = randomBytes(6).toString('hex');
   const base = { attempt, wallet: entry.id, label: entry.label, chain, to: preview.to, amount: Number(preview.amount), via, overridden };
+  const { hash, send } = await preview._prepare();
   await withLedgerLock(() => {
     if (!overridden) {
       const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via });
@@ -56,16 +59,33 @@ export async function executeSend({ entry, chain, via, preview, overridden = fal
         throw err;
       }
     }
-    appendLedger({ ...base, status: 'pending' });
+    appendLedger({ ...base, hash, status: 'pending' });
   });
   try {
-    const result = await preview._exec();
-    appendLedger({ ...base, status: 'sent', hash: String(result).split(' ')[0], result: String(result) });
+    const result = await send();
+    appendLedger({ ...base, hash, status: 'sent', result: String(result) });
     return result;
   } catch (e) {
-    appendLedger({ ...base, status: 'failed', error: (e.shortMessage || e.message || String(e)).slice(0, 200) });
+    // We cannot know whether the RPC accepted it before failing. Keep it on the budget.
+    appendLedger({ ...base, hash, status: 'unknown', error: (e.shortMessage || e.message || String(e)).slice(0, 200) });
+    e.message = `${e.shortMessage || e.message} [recorded as unknown, hash ${hash}; run: wv reconcile ${entry.label}]`;
     throw e;
   }
+}
+
+/** Settle pending/unknown ledger records from chain state. Returns [{attempt, hash, chain, before, after}]. */
+export async function reconcile(records, { txStatus }) {
+  const out = [];
+  for (const r of records.filter(r => (r.status === 'pending' || r.status === 'unknown') && r.hash)) {
+    let st; try { st = await txStatus(r.chain, r.hash); } catch (e) { st = `error: ${e.message.slice(0, 60)}`; }
+    let after = r.status;
+    if (st === 'confirmed') after = 'sent';
+    else if (st === 'reverted') after = 'failed';
+    else if (st === 'notfound' && Date.now() - Date.parse(r.ts) > 48 * 3_600_000) after = 'failed'; // past any nonce/blockhash validity
+    if (after !== r.status) appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st });
+    out.push({ attempt: r.attempt, hash: r.hash, chain: r.chain, before: r.status, chainStatus: st, after });
+  }
+  return out;
 }
 
 /** Mutate entry.policy from CLI flags. */

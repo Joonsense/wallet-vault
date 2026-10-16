@@ -1,8 +1,8 @@
 // Chain table + RPC clients. Public RPCs by default; override per chain with WV_RPC_<KEY> (e.g. WV_RPC_BASE, WV_RPC_SOL).
-import { createPublicClient, createWalletClient, http, formatEther, parseEther, getAddress, isAddress } from 'viem';
+import { createPublicClient, createWalletClient, http, formatEther, parseEther, getAddress, isAddress, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { mainnet, base, arbitrum, optimism, bsc, polygon, avalanche, sepolia, baseSepolia, arbitrumSepolia, optimismSepolia, bscTestnet, polygonAmoy, avalancheFuji } from 'viem/chains';
-import { Connection, Keypair, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { base58 } from '@scure/base';
 
 export const EVM_CHAINS = {
@@ -106,7 +106,21 @@ export async function previewSend(key, { from, to, amount, privateKey, secretKey
     return {
       key, from, to, amount: lamports / LAMPORTS_PER_SOL, symbol: 'SOL',
       fee: fee / LAMPORTS_PER_SOL, balance: balance / LAMPORTS_PER_SOL, after: (balance - lamports - fee) / LAMPORTS_PER_SOL,
-      warnings, _exec: async () => sendAndConfirmTransaction(conn, tx, [kp], { commitment: 'confirmed' }),
+      warnings,
+      // Phase 1 signs locally (hash known before anything leaves the machine); phase 2 broadcasts + confirms.
+      _prepare: async () => {
+        tx.sign(kp);
+        const signature = base58.encode(tx.signature);
+        return {
+          hash: signature,
+          send: async () => {
+            const raw = tx.serialize();
+            const sig = await conn.sendRawTransaction(raw, { skipPreflight: false });
+            await conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
+            return `${sig} (confirmed)`;
+          },
+        };
+      },
     };
   }
   const pub = evmPublic(key);
@@ -129,10 +143,17 @@ export async function previewSend(key, { from, to, amount, privateKey, secretKey
   return {
     key, from: account.address, to, amount: formatEther(value), symbol: symbolOf(key),
     fee: formatEther(feeWei), balance: formatEther(balance), after: formatEther(balance - value - feeWei), nonce, gas: gas.toString(), warnings,
-    _exec: async () => {
-      const hash = await client.sendTransaction({ to, value, gas, ...fees, nonce });
-      const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }).catch(() => null);
-      return receipt ? `${hash} (${receipt.status})` : `${hash} (sent, receipt not yet seen)`;
+    _prepare: async () => {
+      const serialized = await client.signTransaction({ to, value, gas, ...fees, nonce, chain: EVM_CHAINS[key] });
+      const hash = keccak256(serialized);
+      return {
+        hash,
+        send: async () => {
+          const sent = await pub.sendRawTransaction({ serializedTransaction: serialized });
+          const receipt = await pub.waitForTransactionReceipt({ hash: sent, timeout: 120_000 }).catch(() => null);
+          return receipt ? `${sent} (${receipt.status})` : `${sent} (sent, receipt not yet seen)`;
+        },
+      };
     },
   };
 }
@@ -157,3 +178,18 @@ export const EVM_FAUCETS = {
   amoy: ['https://faucet.polygon.technology/'],
   fuji: ['https://core.app/tools/testnet-faucet/'],
 };
+
+/** On-chain status of a hash: 'confirmed' | 'reverted' | 'notfound'. */
+export async function txStatus(key, hash) {
+  if (isSol(key)) {
+    const st = await solConnection(key).getSignatureStatuses([hash], { searchTransactionHistory: true });
+    const v = st.value?.[0];
+    if (!v) return 'notfound';
+    return v.err ? 'reverted' : 'confirmed';
+  }
+  const pub = evmPublic(key);
+  const receipt = await pub.getTransactionReceipt({ hash }).catch(() => null);
+  if (receipt) return receipt.status === 'success' ? 'confirmed' : 'reverted';
+  const tx = await pub.getTransaction({ hash }).catch(() => null);
+  return tx ? 'pending' : 'notfound';
+}

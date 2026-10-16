@@ -4,11 +4,11 @@ import { existsSync } from 'node:fs';
 import { DEFAULT_VAULT_PATH, deriveKey, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
-import { prepareSend, executeSend, materialize, applyPolicyFlags } from './ops.mjs';
+import { prepareSend, executeSend, reconcile, applyPolicyFlags } from './ops.mjs';
 import { describePolicy } from './policy.mjs';
 import { history, LEDGER_PATH } from './ledger.mjs';
 import { listAgents, accountValue, agentNameFor, approveAgent, fmtValidUntil, HL_MAX_DAYS } from './hl.mjs';
-import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, ALL_KEYS, MAINNET_KEYS, TESTNET_KEYS, isSol, isTestnet, solAirdrop, EVM_FAUCETS } from './chains.mjs';
+import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, txStatus, ALL_KEYS, MAINNET_KEYS, TESTNET_KEYS, isSol, isTestnet, solAirdrop, EVM_FAUCETS } from './chains.mjs';
 
 const HELP = `wv - local encrypted wallet vault (EVM + Solana)
 
@@ -20,6 +20,7 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv balance <id|label> [--chain base,sol | all | testnets] [--index N] [--json]
   wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes] [--override-policy]
   wv history [<id|label>] [--limit 20]                       # local spend ledger (${'~/.wallet-vault/ledger.jsonl'})
+  wv reconcile [<id|label>]                                  # settle pending/unknown ledger rows from chain state
 
   Spend policy (bounds every send; agents via MCP cannot exceed it, CLI needs --override-policy + "override"):
   wv policy show <id|label>
@@ -263,6 +264,15 @@ async function main() {
     if (opt.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     if (!rows.length) { console.log(`(empty) ${LEDGER_PATH}`); return; }
     for (const r of rows) console.log(`${r.ts.slice(0, 19)}  #${r.wallet} ${String(r.label).padEnd(12)} ${r.chain.padEnd(12)} ${String(r.amount).padEnd(12)} ${r.status.padEnd(8)} ${r.via}${r.overridden ? ' OVERRIDE' : ''}  ${r.hash || r.error || (r.reasons || []).join('; ') || ''}`);
+    return;
+  }
+
+  if (cmd === 'reconcile') {
+    const { vault } = await open();
+    const e = args[0] ? findEntry(vault, args[0]) : null;
+    const rows = await reconcile(history(e?.id ?? null, 500), { txStatus });
+    if (!rows.length) { console.log('nothing pending or unknown'); return; }
+    for (const r of rows) console.log(`${r.chain.padEnd(12)} ${r.hash}  ${r.before} -> ${r.after}  (chain: ${r.chainStatus})`);
     return;
   }
 
