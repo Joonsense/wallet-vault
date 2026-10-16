@@ -1,6 +1,6 @@
 {
   "name": "wallet-vault",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local encrypted wallet generator + key vault (EVM, Solana). Mainnet personal wallets, created in seconds.",
   "type": "module",
   "private": true,
@@ -15,6 +15,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@nktkas/hyperliquid": "0.33.3",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
@@ -22,6 +23,7 @@
     "@scure/bip39": "^2.4.0",
     "@solana/web3.js": "^1.99.0",
     "micro-key-producer": "^0.10.2",
-    "viem": "^2.57.7"
+    "viem": "^2.57.7",
+    "zod": "^4.6.7"
   }
 }

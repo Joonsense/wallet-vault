@@ -43,6 +43,12 @@ export function visiblePrompt(question) {
 /** Passphrase: env WV_PASSPHRASE (for bots, keep it in .env) or hidden prompt. */
 export async function getPassphrase({ confirm = false, label = 'Vault passphrase' } = {}) {
   if (process.env.WV_PASSPHRASE) return process.env.WV_PASSPHRASE;
+  if (process.env.WV_PASSPHRASE_CMD) {
+    const { execSync } = await import('node:child_process');
+    const out = execSync(process.env.WV_PASSPHRASE_CMD, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).replace(/\r?\n$/, '');
+    if (!out) throw new Error('WV_PASSPHRASE_CMD returned nothing');
+    return out;
+  }
   const p = await hiddenPrompt(`${label}: `);
   if (confirm) {
     const again = await hiddenPrompt('Confirm passphrase: ');

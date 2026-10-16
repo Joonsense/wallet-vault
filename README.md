@@ -63,6 +63,59 @@ wv send test1 --chain sol-devnet --to <addr> --amount 0.1
 - `--dry-run` 은 서명·전송 없이 미리보기만. `--yes` 없이는 "send" 를 타이핑해야 나간다.
 - 네이티브 토큰만. ERC-20·SPL 토큰 전송은 없다.
 
+## 지출 정책 + 원장
+
+지갑마다 정책을 걸면 모든 send 가 그 안에서만 나간다. 에이전트(MCP)는 정책을 넘을 수 없고, 사람(CLI)은 `--override-policy` 를 주고 "override" 를 타이핑해야 넘을 수 있으며 원장에 OVERRIDE 로 남는다.
+
+```bash
+wv policy set bot --chain base,sol --per-tx 0.01 --per-day 0.05 --agent on --note "swan hot"
+wv policy set bot --chain "*" --per-tx 0.001 --per-day 0.003     # 명시 안 된 체인의 기본 한도
+wv policy allow bot 0xMyCold... 9RqexsMySolCold...                # 수신 허용목록 (비어 있으면 아무 주소나)
+wv policy deny bot 0xMyCold...
+wv policy show bot
+wv policy clear bot
+wv history bot                                                    # ~/.wallet-vault/ledger.jsonl (sent·failed·denied·pending)
+```
+
+| 규칙 | 내용 |
+| --- | --- |
+| 체인 | `chains` 에 없는 체인은 거부 |
+| 수신자 | `allow` 가 비어 있지 않으면 목록에 없는 주소 거부 (EVM 은 대소문자 무시, Solana 는 정확 일치) |
+| 건당 | `perTx` 초과 거부 (체인별, 없으면 `*`) |
+| 일일 | 최근 24시간 원장의 sent + pending 합계 + 이번 금액이 `perDay` 초과면 거부. failed·denied 는 안 셈 |
+| 정책 없음 | CLI 는 확인 후 허용, 에이전트는 거부 |
+| 단위 | 체인의 네이티브 단위 (ETH, SOL ...). USD 환산 없음 |
+
+원장은 브로드캐스트 직전에 pending 을 먼저 쓰고 결과로 sent/failed 를 덧쓴다. 중간에 죽어도 pending 이 한도에 계속 잡히므로 보수적으로 동작한다.
+
+## MCP 서버
+
+`wv mcp` 는 stdio MCP 서버다. 정책에 `--agent on` 인 지갑만 보이고, 비밀을 내보내는 도구는 없다.
+
+| 도구 | 하는 일 |
+| --- | --- |
+| list_wallets | 에이전트 지갑의 주소·허용 체인·한도·허용목록 |
+| get_policy | 정책 사람용 설명 |
+| get_balance | 네이티브 잔고 (체인 목록, all, testnets) |
+| spend_history | 최근 시도 (sent·failed·denied) |
+| send_native | 정책 검사 → 미리보기(dry_run) 또는 브로드캐스트. 거부되면 사유와 함께 isError, 원장에 denied 기록 |
+
+stdio 에는 프롬프트가 없으므로 암호는 `WV_PASSPHRASE` 또는 `WV_PASSPHRASE_CMD` 로 준다. macOS 는 키체인이 낫다.
+
+```bash
+security add-generic-password -s wallet-vault -a "$USER" -w       # 한 번, 암호 입력
+```
+
+Claude Code 등록 예 (`~/.claude.json` 또는 프로젝트 `.mcp.json`):
+
+```json
+{ "mcpServers": { "wallet-vault": {
+  "command": "wv", "args": ["mcp"],
+  "env": { "WV_PASSPHRASE_CMD": "security find-generic-password -s wallet-vault -a joons -w" } } } }
+```
+
+스모크 테스트: `WV_VAULT=... WV_PASSPHRASE=... node scripts/mcp-smoke.mjs <wallet> <to>`.
+
 ## Hyperliquid API 지갑 (agent wallet)
 
 HL 봇은 메인 계정 키 대신 메인이 승인한 agent 키로 서명한다. agent 는 거래만 하고 출금은 못 한다.
@@ -83,11 +136,11 @@ eval "$(wv env hl-swan)"                         # 봇에는 agent 키만 주입
 
 | 항목 | 값 |
 | --- | --- |
-| 볼트 위치 | `~/.wallet-vault/vault.json` (`WV_VAULT` 로 변경), 권한 600 |
+| 볼트 위치 | `~/.wallet-vault/vault.json` (`WV_VAULT` 로 변경), 권한 600. 원장 `ledger.jsonl` (`WV_LEDGER`) |
 | 키 파생 | scrypt N=2^17 r=8 p=1, 볼트당 salt 32바이트 |
 | 암호화 | AES-256-GCM, 지갑 항목마다 별도 iv·tag |
 | HL 서명 | @nktkas/hyperliquid ExchangeClient (viem 계정), 메인넷 api.hyperliquid.xyz / 테스트넷 api.hyperliquid-testnet.xyz |
-| 암호 입력 | 숨김 프롬프트, 또는 `WV_PASSPHRASE` 환경변수 (.env 에만, 커밋 금지) |
+| 암호 입력 | 숨김 프롬프트, `WV_PASSPHRASE` (.env 에만), 또는 `WV_PASSPHRASE_CMD` (키체인 조회 명령) |
 | 파생 경로 | EVM `m/44'/60'/0'/0/i`, Solana `m/44'/501'/i'/0'` (MetaMask·Phantom 과 동일) |
 
 주소 외의 비밀은 `export` 와 `env` 두 명령에서만 stdout 으로 나오고, 그때마다 stderr 에 경고가 붙는다.
