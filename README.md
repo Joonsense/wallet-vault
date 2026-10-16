@@ -26,7 +26,33 @@ wv import hot --evm               # 원시 개인키 가져오기 (--sol 은 bas
 wv rm trader1                     # 라벨 타이핑 확인 후 삭제
 wv passwd                         # 볼트 암호 교체 (항상 프롬프트, WV_PASSPHRASE 무시, 같은 암호 거부)
 wv backup ~/Backups/vault.json    # 암호화된 상태로 복사
+wv balance trader1                # 8개 체인 네이티브 잔고 병렬 조회 (--chain base,sol / --json / --index N)
+wv send trader1 --chain base --to 0x... --amount 0.01 --dry-run   # 수수료·잔고 미리보기만
+wv send trader1 --chain sol --to <addr> --amount 0.1              # "send" 타이핑 확인 후 브로드캐스트
 ```
+
+## 체인
+
+| 키 | 체인 | 네이티브 | 기본 RPC |
+| --- | --- | --- | --- |
+| eth | Ethereum | ETH | viem 기본 공개 RPC |
+| base | Base | ETH | mainnet.base.org |
+| arb | Arbitrum One | ETH | arb1.arbitrum.io |
+| op | OP Mainnet | ETH | mainnet.optimism.io |
+| bnb | BNB Chain | BNB | viem 기본 공개 RPC |
+| polygon | Polygon PoS | POL | viem 기본 공개 RPC |
+| avax | Avalanche C | AVAX | api.avax.network |
+| sol | Solana | SOL | api.mainnet-beta.solana.com |
+
+공개 RPC 는 속도 제한이 있으니 자주 쓰면 `WV_RPC_BASE=https://...` 처럼 체인별 RPC 를 .env 에 넣는다. 별칭: ethereum, arbitrum, optimism, bsc, matic, solana.
+
+### send 안전장치
+
+- EVM 주소는 체크섬 불일치면 거부, Solana 주소는 base58 공개키 검증.
+- 보내기 전 수수료(EVM maxFee × gas, SOL getFeeForMessage)·잔고 변화·경고를 보여주고, 잔고 부족이면 브로드캐스트 전에 중단.
+- 수신자가 컨트랙트면 경고, Solana 새 계정이면 rent exempt 최소액 미만 경고.
+- `--dry-run` 은 서명·전송 없이 미리보기만. `--yes` 없이는 "send" 를 타이핑해야 나간다.
+- 네이티브 토큰만. ERC-20·SPL 토큰 전송은 없다.
 
 ## 보관 방식
 

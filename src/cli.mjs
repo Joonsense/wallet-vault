@@ -1,9 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --no-deprecation
 import { parseArgs } from 'node:util';
 import { existsSync } from 'node:fs';
 import { DEFAULT_VAULT_PATH, deriveKey, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
+import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, ALL_KEYS } from './chains.mjs';
 
 const HELP = `wv - local encrypted wallet vault (EVM + Solana)
 
@@ -12,6 +13,8 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv show <id|label|address> [--index N]
   wv export <id|label> (--mnemonic | --evm | --sol) [--index N] [--yes]
   wv env <id|label> [--index N]            # eval "$(wv env trader1)" -> EVM_PRIVATE_KEY, SOL_SECRET_KEY
+  wv balance <id|label> [--chain eth,base,arb,op,bnb,polygon,avax,sol|all] [--index N] [--json]
+  wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes]
   wv import <label> (--mnemonic | --evm | --sol) [--chain ...]   # secret is asked via hidden prompt, never argv
   wv rename <id|label> <new-label>
   wv rm <id|label> [--yes]
@@ -19,6 +22,7 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv backup <dest-file>
   wv path                                  # vault location
 
+  Chains: ${ALL_KEYS.join(' ')}   RPC override: WV_RPC_<CHAIN> (e.g. WV_RPC_BASE, WV_RPC_SOL)
   Vault: ${DEFAULT_VAULT_PATH}  (override with WV_VAULT)
   Passphrase: prompted, or WV_PASSPHRASE env (put it in .env, never commit).
   Secrets print only on export/env, to stdout, with a warning on stderr.`;
@@ -31,6 +35,9 @@ const { values: opt, positionals } = parseArgs({
     count: { type: 'string', default: '1' },
     index: { type: 'string', default: '0' },
     note: { type: 'string' },
+    to: { type: 'string' },
+    amount: { type: 'string' },
+    'dry-run': { type: 'boolean' },
     mnemonic: { type: 'boolean' },
     evm: { type: 'boolean' },
     sol: { type: 'boolean' },
@@ -66,6 +73,22 @@ async function confirmReveal(what) {
   if (opt.yes) return;
   const a = await visiblePrompt(`Reveal ${what}? type "reveal" to continue: `);
   if (a !== 'reveal') err('aborted');
+}
+
+/** Addresses + secrets of an entry at a derivation index (0 = stored values). */
+function materialize(e, s, idx) {
+  const out = { evm: null, sol: null };
+  if (e.chains.includes('evm')) {
+    out.evm = idx === 0 || s.kind !== 'mnemonic'
+      ? { address: e.addresses.evm, privateKey: s.evmPrivateKey }
+      : evmFromMnemonic(s.mnemonic, idx);
+  }
+  if (e.chains.includes('sol')) {
+    out.sol = idx === 0 || s.kind !== 'mnemonic'
+      ? { address: e.addresses.sol, secretKey: s.solSecretKey }
+      : solFromMnemonic(s.mnemonic, idx);
+  }
+  return out;
 }
 
 async function main() {
@@ -156,6 +179,62 @@ async function main() {
     }
     warn(`# secrets for #${e.id} ${e.label} exported to the current shell only`);
     console.log(lines.join('\n'));
+    return;
+  }
+
+  if (cmd === 'balance') {
+    const { vault, key } = await open();
+    const e = findEntry(vault, args[0] ?? err('wallet ref required'));
+    const idx = Number(opt.index);
+    const keys = resolveChainKeys(opt.chain === 'all' ? null : opt.chain).filter(k => (k === 'sol' ? e.chains.includes('sol') : e.chains.includes('evm')));
+    if (!keys.length) err('this wallet has no key for the requested chains');
+    // address only; no secret needed unless index > 0
+    const w = idx === 0 ? { evm: { address: e.addresses.evm }, sol: { address: e.addresses.sol } } : materialize(e, readSecret(e, key), idx);
+    const rows = await Promise.all(keys.map(async k => {
+      const address = k === 'sol' ? w.sol.address : w.evm.address;
+      try { return { chain: k, symbol: symbolOf(k), address, balance: await nativeBalance(k, address) }; }
+      catch (x) { return { chain: k, symbol: symbolOf(k), address, error: (x.shortMessage || x.message || String(x)).split('\n')[0].slice(0, 80) }; }
+    }));
+    if (opt.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    for (const r of rows) {
+      console.log(`${r.chain.padEnd(8)} ${r.error ? 'error: ' + r.error : (Number(r.balance) === 0 ? '0' : r.balance) + ' ' + r.symbol}`);
+    }
+    return;
+  }
+
+  if (cmd === 'send') {
+    const [k] = resolveChainKeys(opt.chain === 'all' ? err('--chain is required for send (one chain)') : opt.chain);
+    if (resolveChainKeys(opt.chain).length !== 1) err('send takes exactly one --chain');
+    if (!opt.to) err('--to required');
+    if (!opt.amount) err('--amount required');
+    const to = validateRecipient(k, opt.to);
+    const { vault, key } = await open();
+    const e = findEntry(vault, args[0] ?? err('wallet ref required'));
+    if (!e.chains.includes(k === 'sol' ? 'sol' : 'evm')) err(`wallet has no ${k === 'sol' ? 'solana' : 'evm'} key`);
+    const w = materialize(e, readSecret(e, key), Number(opt.index));
+    const p = await previewSend(k, {
+      from: k === 'sol' ? w.sol.address : w.evm.address, to, amount: opt.amount,
+      privateKey: w.evm?.privateKey, secretKey: w.sol?.secretKey,
+    });
+    warn([
+      `chain    ${k}`,
+      `from     ${p.from}  (#${e.id} ${e.label}${Number(opt.index) ? ' index ' + opt.index : ''})`,
+      `to       ${p.to}`,
+      `amount   ${p.amount} ${p.symbol}`,
+      `max fee  ${p.fee} ${p.symbol}${p.gas ? '  (gas ' + p.gas + ', nonce ' + p.nonce + ')' : ''}`,
+      `balance  ${p.balance} -> ${p.after} ${p.symbol}`,
+      ...p.warnings.map(x => `WARNING  ${x}`),
+    ].join('\n'));
+    if (p.warnings.some(x => x.startsWith('insufficient'))) err('aborted: insufficient balance');
+    if (opt['dry-run']) { warn('dry-run: nothing sent'); return; }
+    if (!opt.yes) {
+      const a = await visiblePrompt(`Send ${p.amount} ${p.symbol} on ${k} to ${p.to}? type "send" to broadcast: `);
+      if (a !== 'send') err('aborted');
+    }
+    const result = await p._exec();
+    const hash = String(result).split(' ')[0];
+    console.log(result);
+    warn(explorerTx(k, hash));
     return;
   }
 

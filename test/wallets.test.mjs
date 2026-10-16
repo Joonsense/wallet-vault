@@ -36,3 +36,13 @@ test('vault encrypt/decrypt + rotate', () => {
   assert.throws(() => decrypt(k, v.entries[0].enc));
   assert.equal(decrypt(k2, v.check), 'wallet-vault-check-v1');
 });
+
+test('recipient validation', async () => {
+  const { validateRecipient, resolveChainKeys } = await import('../src/chains.mjs');
+  assert.equal(validateRecipient('base', '0x000000000000000000000000000000000000dead'), '0x000000000000000000000000000000000000dEaD');
+  assert.throws(() => validateRecipient('base', '0x000000000000000000000000000000000000DEAD'), /checksum/);
+  assert.throws(() => validateRecipient('sol', 'nope'), /invalid Solana/);
+  assert.equal(validateRecipient('sol', 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk'), 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk');
+  assert.deepEqual(resolveChainKeys('ethereum,ARB,solana'), ['eth', 'arb', 'sol']);
+  assert.throws(() => resolveChainKeys('tron'), /unknown chain/);
+});
