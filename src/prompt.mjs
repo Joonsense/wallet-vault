@@ -1,14 +1,23 @@
 import { createInterface } from 'node:readline';
 
+let pipedLines = null;
+function readPipedLines() {
+  if (pipedLines) return pipedLines;
+  pipedLines = new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', d => { data += d; });
+    process.stdin.on('end', () => resolve(data.split('\n')));
+    process.stdin.on('error', reject);
+  });
+  return pipedLines;
+}
+
 export function hiddenPrompt(question) {
   return new Promise((resolve, reject) => {
     if (!process.stdin.isTTY) {
-      // Non interactive: read one line from stdin (piped passphrase)
-      let data = '';
-      process.stdin.setEncoding('utf8');
-      process.stdin.on('data', d => { data += d; });
-      process.stdin.on('end', () => resolve(data.split('\n')[0]));
-      process.stdin.on('error', reject);
+      // Non interactive: passphrase lines piped on stdin, served in order (confirm needs two lines)
+      readPipedLines().then(lines => resolve(lines.shift() ?? '')).catch(reject);
       return;
     }
     const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
