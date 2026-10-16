@@ -3,7 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { openVault, loadVaultFile, deriveKey, DEFAULT_VAULT_PATH } from './vault.mjs';
+import { openVault, loadVaultFile, verifyPolicy, DEFAULT_VAULT_PATH } from './vault.mjs';
 import { getPassphrase } from './prompt.mjs';
 import { nativeBalance, resolveChainKeys, symbolOf, explorerTx, ALL_KEYS, isSol } from './chains.mjs';
 import { prepareSend, executeSend } from './ops.mjs';
@@ -29,7 +29,11 @@ export async function startMcp() {
     else vault = v;
     return vault;
   };
-  const agentWallets = () => fresh().entries.filter(e => e.policy?.agent);
+  const agentWallets = () => fresh().entries.filter(e => {
+    if (!e.policy?.agent) return false;
+    if (!verifyPolicy(key, e)) { process.stderr.write(`wallet-vault: policy MAC invalid on #${e.id} ${e.label}; hidden from agents\n`); return false; }
+    return true;
+  });
   const pick = (ref) => {
     const list = agentWallets();
     const e = list.find(x => String(x.id) === String(ref) || x.label === ref || Object.values(x.addresses).some(a => a?.toLowerCase() === String(ref).toLowerCase()));
@@ -91,7 +95,7 @@ export async function startMcp() {
       const summary = { chain: k, from: p.from, to: p.to, amount: p.amount, symbol: p.symbol, max_fee: p.fee, balance_before: p.balance, balance_after: p.after, warnings: p.warnings, spent_last_24h: prep.policy.spentToday, limit: prep.policy.limit };
       if (p.warnings.some(w => w.startsWith('insufficient'))) return fail({ ...summary, error: 'insufficient balance' });
       if (dry_run) return text({ dry_run: true, ...summary });
-      const result = await executeSend({ entry: e, chain: k, via: 'mcp', preview: p });
+      const result = await executeSend({ entry: e, key, chain: k, via: 'mcp', preview: p });
       const hash = String(result).split(' ')[0];
       return text({ ...summary, result, explorer: explorerTx(k, hash) });
     } catch (x) { return fail(x.shortMessage || x.message || String(x)); }

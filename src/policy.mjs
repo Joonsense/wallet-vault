@@ -8,7 +8,8 @@
 //   agent:  true,                              // exposed to the MCP server
 //   note:   'swan hot wallet'
 // }
-import { spentInWindow } from './ledger.mjs';
+import { spentInWindow, verifyLedger } from './ledger.mjs';
+import { verifyPolicy } from './vault.mjs';
 import { isSol } from './chains.mjs';
 
 export function emptyPolicy() {
@@ -28,10 +29,14 @@ function sameAddr(a, b, chain) {
  * `via` is 'cli' or 'mcp'. Without a policy a human on the CLI may proceed (they confirm interactively),
  * an agent may not.
  */
-export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now() }) {
+export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now(), key }) {
   const reasons = [];
   const p = entry.policy;
   const amt = Number(amount);
+  if (!key) throw new Error('evaluate needs the vault key');
+  if (!verifyPolicy(key, entry)) reasons.push('policy signature invalid: vault.json was edited outside wv (re-save with wv policy set, or wv policy clear)');
+  const ledger = verifyLedger(key);
+  if (!ledger.ok) reasons.push(`ledger integrity failure: ${ledger.reason}`);
   if (!p) {
     if (via !== 'cli') reasons.push('wallet has no spend policy; agent access requires one (wv policy set ...)');
     return { ok: reasons.length === 0, reasons, limit: null, spentToday: 0, policy: null };
@@ -47,7 +52,7 @@ export function evaluate(entry, { chain, to, amount, via = 'cli', now = Date.now
     if (!(amt > 0)) reasons.push('amount must be > 0');
     if (limit.perTx != null && amt > limit.perTx) reasons.push(`amount ${amt} exceeds per-tx limit ${limit.perTx}`);
     if (limit.perDay != null) {
-      spentToday = spentInWindow(entry.id, chain, 86_400_000, now);
+      spentToday = spentInWindow(entry.id, chain, 86_400_000, now, ledger.records.filter(r => !r._corrupt));
       if (spentToday + amt > limit.perDay) reasons.push(`daily limit ${limit.perDay}: already ${spentToday} in the last 24h, +${amt} exceeds it`);
     }
   }

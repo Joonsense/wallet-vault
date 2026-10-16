@@ -1,12 +1,12 @@
 #!/usr/bin/env -S node --no-deprecation
 import { parseArgs } from 'node:util';
 import { existsSync } from 'node:fs';
-import { DEFAULT_VAULT_PATH, deriveKey, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
+import { DEFAULT_VAULT_PATH, deriveKey, verifyPolicy, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
 import { prepareSend, executeSend, reconcile, applyPolicyFlags } from './ops.mjs';
 import { describePolicy } from './policy.mjs';
-import { history, LEDGER_PATH } from './ledger.mjs';
+import { history, verifyLedger, LEDGER_PATH } from './ledger.mjs';
 import { listAgents, accountValue, agentNameFor, approveAgent, fmtValidUntil, HL_MAX_DAYS } from './hl.mjs';
 import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, txStatus, ALL_KEYS, MAINNET_KEYS, TESTNET_KEYS, isSol, isTestnet, solAirdrop, EVM_FAUCETS } from './chains.mjs';
 
@@ -21,6 +21,7 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes] [--override-policy]
   wv history [<id|label>] [--limit 20]                       # local spend ledger (${'~/.wallet-vault/ledger.jsonl'})
   wv reconcile [<id|label>]                                  # settle pending/unknown ledger rows from chain state
+  wv ledger verify                                           # HMAC chain + head check (policy and ledger are signed with the vault key)
 
   Spend policy (bounds every send; agents via MCP cannot exceed it, CLI needs --override-policy + "override"):
   wv policy show <id|label>
@@ -250,7 +251,7 @@ async function main() {
       const a = await visiblePrompt(`Send ${p.amount} ${p.symbol} on ${k} to ${p.to}? type "send" to broadcast: `);
       if (a !== 'send') err('aborted');
     }
-    const result = await executeSend({ entry: e, chain: k, via: 'cli', preview: p, overridden });
+    const result = await executeSend({ entry: e, key, chain: k, via: 'cli', preview: p, overridden });
     const hash = String(result).split(' ')[0];
     console.log(result);
     warn(explorerTx(k, hash));
@@ -267,10 +268,18 @@ async function main() {
     return;
   }
 
+  if (cmd === 'ledger') {
+    const { key } = await open();
+    const v = verifyLedger(key);
+    console.log(v.ok ? `ok: ${v.count} records, head matches (${LEDGER_PATH})` : `FAIL: ${v.reason}`);
+    if (!v.ok) process.exit(2);
+    return;
+  }
+
   if (cmd === 'reconcile') {
-    const { vault } = await open();
+    const { vault, key } = await open();
     const e = args[0] ? findEntry(vault, args[0]) : null;
-    const rows = await reconcile(history(e?.id ?? null, 500), { txStatus });
+    const rows = await reconcile(history(e?.id ?? null, 500), { txStatus, key });
     if (!rows.length) { console.log('nothing pending or unknown'); return; }
     for (const r of rows) console.log(`${r.chain.padEnd(12)} ${r.hash}  ${r.before} -> ${r.after}  (chain: ${r.chainStatus})`);
     return;
@@ -278,14 +287,14 @@ async function main() {
 
   if (cmd === 'policy') {
     const sub = args[0] ?? err('policy subcommand: show | set | allow | deny | clear');
-    const { vault } = await open();
+    const { vault, key } = await open();
     const e = findEntry(vault, args[1] ?? err('wallet ref required'));
-    if (sub === 'show') { console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}`); return; }
+    if (sub === 'show') { console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}${e.policy && !verifyPolicy(key, e) ? '\nWARNING  policy signature INVALID (edited outside wv); agents will not see this wallet until re-saved' : ''}`); return; }
     if (sub === 'set') {
       const chains = opt.chain === 'all' ? [] : opt.chain === '*' ? ['*'] : resolveChainKeys(opt.chain);
       const agent = opt.agent == null ? null : /^(on|true|yes|1)$/i.test(opt.agent) ? true : /^(off|false|no|0)$/i.test(opt.agent) ? false : err('--agent on|off');
       const num = (v, n) => v == null ? null : (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : err(`${n} must be a number >= 0`));
-      applyPolicyFlags(e, { chains, perTx: num(opt['per-tx'], '--per-tx'), perDay: num(opt['per-day'], '--per-day'), agent, note: opt.note });
+      applyPolicyFlags(e, key, { chains, perTx: num(opt['per-tx'], '--per-tx'), perDay: num(opt['per-day'], '--per-day'), agent, note: opt.note });
     } else if (sub === 'allow' || sub === 'deny') {
       const addrs = args.slice(2);
       if (!addrs.length) err('address(es) required');
@@ -295,9 +304,9 @@ async function main() {
         if (!okEvm && !okSol) err(`not an EVM or Solana address: ${a}`);
         if (okEvm) validateRecipient('eth', a);
       }
-      applyPolicyFlags(e, sub === 'allow' ? { allowAdd: addrs } : { allowRemove: addrs });
+      applyPolicyFlags(e, key, sub === 'allow' ? { allowAdd: addrs } : { allowRemove: addrs });
     } else if (sub === 'clear') {
-      applyPolicyFlags(e, { clear: true });
+      applyPolicyFlags(e, key, { clear: true });
     } else err(`unknown policy subcommand "${sub}"`);
     saveVaultFile(vault);
     console.log(`#${e.id} ${e.label}\n${describePolicy(e.policy)}`);

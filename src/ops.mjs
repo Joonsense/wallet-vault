@@ -1,6 +1,6 @@
 // Shared send pipeline for CLI and MCP: validate -> policy -> preview -> (confirm outside) -> ledger pending -> broadcast -> ledger result.
 import { randomBytes } from 'node:crypto';
-import { readSecret, saveVaultFile } from './vault.mjs';
+import { readSecret, signPolicy } from './vault.mjs';
 import { evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { previewSend, validateRecipient, isSol } from './chains.mjs';
 import { evaluate } from './policy.mjs';
@@ -25,9 +25,9 @@ export function materialize(e, s, idx = 0) {
 export async function prepareSend({ entry, key, chain, to: rawTo, amount, index = 0, via = 'cli' }) {
   const to = validateRecipient(chain, rawTo);
   if (!entry.chains.includes(isSol(chain) ? 'sol' : 'evm')) throw new Error(`wallet has no ${isSol(chain) ? 'solana' : 'evm'} key`);
-  const policy = evaluate(entry, { chain, to, amount, via });
+  const policy = evaluate(entry, { chain, to, amount, via, key });
   if (!policy.ok && via !== 'cli') {
-    appendLedger({ attempt: randomBytes(6).toString('hex'), wallet: entry.id, label: entry.label, chain, to, amount: Number(amount), via, status: 'denied', reasons: policy.reasons });
+    await withLedgerLock(() => { try { appendLedger({ attempt: randomBytes(6).toString('hex'), wallet: entry.id, label: entry.label, chain, to, amount: Number(amount), via, status: 'denied', reasons: policy.reasons }, key); } catch {} });
     return { to, policy, preview: null };
   }
   const w = materialize(entry, readSecret(entry, key), index);
@@ -45,36 +45,37 @@ export async function prepareSend({ entry, key, chain, to: rawTo, amount, index 
  * 3. broadcast + confirm. Success -> 'sent'. Any error after this point -> 'unknown' (still counted against the
  *    budget, because the tx may be on chain); `wv reconcile` later settles it from chain state.
  */
-export async function executeSend({ entry, chain, via, preview, overridden = false }) {
+export async function executeSend({ entry, key, chain, via, preview, overridden = false }) {
+  if (!key) throw new Error('executeSend needs the vault key');
   const attempt = randomBytes(6).toString('hex');
   const base = { attempt, wallet: entry.id, label: entry.label, chain, to: preview.to, amount: Number(preview.amount), via, overridden };
   const { hash, send } = await preview._prepare();
   await withLedgerLock(() => {
     if (!overridden) {
-      const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via });
+      const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via, key });
       if (!check.ok) {
-        appendLedger({ ...base, status: 'denied', reasons: check.reasons });
+        appendLedger({ ...base, status: 'denied', reasons: check.reasons }, key);
         const err = new Error(`policy denied at broadcast time: ${check.reasons.join('; ')}`);
         err.denied = true; err.reasons = check.reasons;
         throw err;
       }
     }
-    appendLedger({ ...base, hash, status: 'pending' });
+    appendLedger({ ...base, hash, status: 'pending' }, key);
   });
   try {
     const result = await send();
-    appendLedger({ ...base, hash, status: 'sent', result: String(result) });
+    await withLedgerLock(() => appendLedger({ ...base, hash, status: 'sent', result: String(result) }, key));
     return result;
   } catch (e) {
     // We cannot know whether the RPC accepted it before failing. Keep it on the budget.
-    appendLedger({ ...base, hash, status: 'unknown', error: (e.shortMessage || e.message || String(e)).slice(0, 200) });
+    await withLedgerLock(() => appendLedger({ ...base, hash, status: 'unknown', error: (e.shortMessage || e.message || String(e)).slice(0, 200) }, key));
     e.message = `${e.shortMessage || e.message} [recorded as unknown, hash ${hash}; run: wv reconcile ${entry.label}]`;
     throw e;
   }
 }
 
 /** Settle pending/unknown ledger records from chain state. Returns [{attempt, hash, chain, before, after}]. */
-export async function reconcile(records, { txStatus }) {
+export async function reconcile(records, { txStatus, key }) {
   const out = [];
   for (const r of records.filter(r => (r.status === 'pending' || r.status === 'unknown') && r.hash)) {
     let st; try { st = await txStatus(r.chain, r.hash); } catch (e) { st = `error: ${e.message.slice(0, 60)}`; }
@@ -82,15 +83,15 @@ export async function reconcile(records, { txStatus }) {
     if (st === 'confirmed') after = 'sent';
     else if (st === 'reverted') after = 'failed';
     else if (st === 'notfound' && Date.now() - Date.parse(r.ts) > 48 * 3_600_000) after = 'failed'; // past any nonce/blockhash validity
-    if (after !== r.status) appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st });
+    if (after !== r.status) await withLedgerLock(() => appendLedger({ attempt: r.attempt, wallet: r.wallet, label: r.label, chain: r.chain, to: r.to, amount: r.amount, via: r.via, hash: r.hash, status: after, reconciled: st }, key));
     out.push({ attempt: r.attempt, hash: r.hash, chain: r.chain, before: r.status, chainStatus: st, after });
   }
   return out;
 }
 
 /** Mutate entry.policy from CLI flags. */
-export function applyPolicyFlags(entry, { chains, perTx, perDay, agent, note, allowAdd, allowRemove, clear }) {
-  if (clear) { delete entry.policy; return; }
+export function applyPolicyFlags(entry, key, { chains, perTx, perDay, agent, note, allowAdd, allowRemove, clear }) {
+  if (clear) { delete entry.policy; signPolicy(key, entry); return; }
   const p = entry.policy || { chains: [], allow: [], limits: {}, agent: false, note: '' };
   if (chains?.length) {
     for (const c of chains) {
@@ -109,4 +110,5 @@ export function applyPolicyFlags(entry, { chains, perTx, perDay, agent, note, al
   for (const a of allowAdd || []) if (!p.allow.includes(a)) p.allow.push(a);
   if (allowRemove?.length) p.allow = p.allow.filter(a => !allowRemove.some(r => r.toLowerCase() === a.toLowerCase()));
   entry.policy = p;
+  signPolicy(key, entry);
 }

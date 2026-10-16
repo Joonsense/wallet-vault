@@ -86,7 +86,19 @@ wv history bot                                                    # ~/.wallet-va
 | 정책 없음 | CLI 는 확인 후 허용, 에이전트는 거부 |
 | 단위 | 체인의 네이티브 단위 (ETH, SOL ...). USD 환산 없음 |
 
-원장은 브로드캐스트 직전에 pending 을 먼저 쓰고 결과로 sent/failed 를 덧쓴다. 중간에 죽어도 pending 이 한도에 계속 잡히므로 보수적으로 동작한다.
+송금 순서는 로컬 서명(해시 확정) → 원장 락 안에서 정책 재검사 + 해시 포함 pending 기록 → 브로드캐스트다. 전송 이후의 오류는 failed 가 아니라 unknown 으로 남아 한도에 계속 잡히고, `wv reconcile` 이 체인 상태(영수증·서명 상태)로 sent/failed 를 확정한다. 48시간 넘게 체인에 없으면 failed 로 정리한다.
+
+### 무결성
+
+정책과 원장은 평문 메타데이터라서 볼트 키에서 파생한 서브키로 서명한다.
+
+| 대상 | 방식 | 깨지면 |
+| --- | --- | --- |
+| entry.policy | HMAC(id + policy) 를 `policyMac` 에 저장, `wv policy *` 만 갱신 | MCP 에서 지갑이 숨겨지고, CLI 는 경고 + 정책 거부 사유로 표시 |
+| ledger.jsonl | 레코드마다 이전 MAC 에 체인된 HMAC, 머리(count·mac) 는 `ledger.head` 에 서명 저장 | 에이전트 send 거부, CLI 는 `--override-policy` 로만 진행, `wv ledger verify` 로 원인 확인 |
+| 락 | mkdir 원자 생성 + 소유자 토큰, 30초 지난 락은 rename 으로 한 프로세스만 탈취 | 10초 대기 후 "lock timeout" |
+
+위협 모델을 정직하게 적으면: 이 장치는 MCP 도구 경계로 들어오는 에이전트의 실수·프롬프트 인젝션·"파일을 고쳐 한도를 풀기" 를 막는다. 같은 사용자 권한으로 임의 셸을 실행하는 에이전트가 키체인에서 암호를 직접 꺼내는 것, 또는 vault.json·ledger.jsonl·ledger.head 세 파일을 과거 시점으로 함께 되돌리는 롤백은 막지 못한다. 그 둘은 에이전트에 셸 권한을 주지 않는 것과 백업 보관으로 다뤄야 한다.
 
 ## MCP 서버
 

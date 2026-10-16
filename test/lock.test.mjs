@@ -4,17 +4,20 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 process.env.WV_LEDGER = join(mkdtempSync(join(tmpdir(), 'wvl-')), 'ledger.jsonl');
+const { deriveKey, emptyVault, signPolicy } = await import('../src/vault.mjs');
+const key = deriveKey('unit test passphrase', emptyVault().kdf.salt);
+const signed = (e) => { signPolicy(key, e); return e; };
 const { executeSend, reconcile } = await import('../src/ops.mjs');
 const { history, spentInWindow } = await import('../src/ledger.mjs');
 
 test('concurrent sends cannot both pass the daily limit', async () => {
-  const entry = { id: 1, label: 'bot', chains: ['evm'], addresses: { evm: '0xA' },
-    policy: { chains: ['base'], allow: [], limits: { base: { perTx: 0.01, perDay: 0.015 } }, agent: true } };
+  const entry = signed({ id: 1, label: 'bot', chains: ['evm'], addresses: { evm: '0xA' },
+    policy: { chains: ['base'], allow: [], limits: { base: { perTx: 0.01, perDay: 0.015 } }, agent: true } });
   const mk = (h = '0xhash') => ({ to: '0x000000000000000000000000000000000000dEaD', amount: '0.01', _prepare: async () => ({ hash: h, send: async () => { await new Promise(r => setTimeout(r, 30)); return h + ' (success)'; } }) });
   const results = await Promise.allSettled([
-    executeSend({ entry, chain: 'base', via: 'mcp', preview: mk() }),
-    executeSend({ entry, chain: 'base', via: 'mcp', preview: mk() }),
-    executeSend({ entry, chain: 'base', via: 'mcp', preview: mk() }),
+    executeSend({ entry, key, chain: 'base', via: 'mcp', preview: mk() }),
+    executeSend({ entry, key, chain: 'base', via: 'mcp', preview: mk() }),
+    executeSend({ entry, key, chain: 'base', via: 'mcp', preview: mk() }),
   ]);
   const ok = results.filter(r => r.status === 'fulfilled').length;
   const denied = results.filter(r => r.status === 'rejected' && r.reason.denied).length;
@@ -26,21 +29,21 @@ test('concurrent sends cannot both pass the daily limit', async () => {
 });
 
 test('error after broadcast is recorded unknown and still counts; reconcile settles it', async () => {
-  const entry = { id: 2, label: 'bot2', chains: ['evm'], addresses: { evm: '0xA' },
-    policy: { chains: ['base'], allow: [], limits: { base: { perTx: 0.01, perDay: 0.1 } }, agent: true } };
+  const entry = signed({ id: 2, label: 'bot2', chains: ['evm'], addresses: { evm: '0xA' },
+    policy: { chains: ['base'], allow: [], limits: { base: { perTx: 0.01, perDay: 0.1 } }, agent: true } });
   const p = { to: '0x000000000000000000000000000000000000dEaD', amount: '0.01', _prepare: async () => ({ hash: '0xdead1', send: async () => { throw new Error('confirm timeout'); } }) };
-  await assert.rejects(executeSend({ entry, chain: 'base', via: 'mcp', preview: p }), /unknown/);
+  await assert.rejects(executeSend({ entry, key, chain: 'base', via: 'mcp', preview: p }), /unknown/);
   assert.equal(history(2, 5)[0].status, 'unknown');
   assert.equal(spentInWindow(2, 'base'), 0.01);
-  const r1 = await reconcile(history(2, 5), { txStatus: async () => 'notfound' });
+  const r1 = await reconcile(history(2, 5), { txStatus: async () => 'notfound', key });
   assert.equal(r1[0].after, 'unknown');                         // too young to write off
-  const r2 = await reconcile(history(2, 5), { txStatus: async () => 'confirmed' });
+  const r2 = await reconcile(history(2, 5), { txStatus: async () => 'confirmed', key });
   assert.equal(r2[0].after, 'sent');
   assert.equal(history(2, 5)[0].status, 'sent');
   assert.equal(spentInWindow(2, 'base'), 0.01);
   // a reverted one frees the budget
   const p2 = { ...p, _prepare: async () => ({ hash: '0xdead2', send: async () => { throw new Error('boom'); } }) };
-  await assert.rejects(executeSend({ entry, chain: 'base', via: 'mcp', preview: p2 }));
-  await reconcile(history(2, 10), { txStatus: async (k, h) => (h === '0xdead2' ? 'reverted' : 'confirmed') });
+  await assert.rejects(executeSend({ entry, key, chain: 'base', via: 'mcp', preview: p2 }));
+  await reconcile(history(2, 10), { txStatus: async (k, h) => (h === '0xdead2' ? 'reverted' : 'confirmed'), key });
   assert.equal(spentInWindow(2, 'base'), 0.01);
 });

@@ -1,6 +1,6 @@
 // Encrypted local vault. One file, AES-256-GCM per entry, scrypt-derived key.
 // Nothing here ever prints a secret; callers decide what to reveal.
-import { randomBytes, scryptSync, createCipheriv, createDecipheriv, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, createCipheriv, createDecipheriv, timingSafeEqual, createHmac } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, chmodSync, copyFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -133,4 +133,30 @@ export function rotatePassphrase(vault, oldKey, newPassphrase) {
   vault.kdf = fresh.kdf;
   vault.check = encrypt(newKey, CHECK_PLAINTEXT);
   return newKey;
+}
+
+// ---- Integrity: policy + ledger are plaintext metadata, so they are authenticated with a subkey of the vault key.
+// An agent process with file access (same user) cannot loosen its own policy or truncate the ledger without the passphrase.
+// Known limit: a full rollback (restoring older vault.json + ledger + ledger.head together) is not detected.
+export function macKey(key, purpose) {
+  return createHmac('sha256', key).update(`wallet-vault:${purpose}`).digest();
+}
+export function stableStringify(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+  return JSON.stringify(v);
+}
+export function hmacHex(subkey, data) {
+  return createHmac('sha256', subkey).update(data).digest('hex');
+}
+export function signPolicy(key, entry) {
+  if (!entry.policy) { delete entry.policyMac; return; }
+  entry.policyMac = hmacHex(macKey(key, 'policy'), stableStringify({ id: entry.id, policy: entry.policy }));
+}
+export function verifyPolicy(key, entry) {
+  if (!entry.policy) return !entry.policyMac;
+  if (!entry.policyMac) return false;
+  const want = hmacHex(macKey(key, 'policy'), stableStringify({ id: entry.id, policy: entry.policy }));
+  const a = Buffer.from(want, 'hex'), b = Buffer.from(String(entry.policyMac), 'hex');
+  return a.length === b.length && timingSafeEqual(a, b);
 }
