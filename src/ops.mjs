@@ -4,7 +4,7 @@ import { readSecret, saveVaultFile } from './vault.mjs';
 import { evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { previewSend, validateRecipient, isSol } from './chains.mjs';
 import { evaluate } from './policy.mjs';
-import { appendLedger } from './ledger.mjs';
+import { appendLedger, withLedgerLock } from './ledger.mjs';
 
 /** Addresses + secrets of an entry at a derivation index (0 = stored values). */
 export function materialize(e, s, idx = 0) {
@@ -38,11 +38,26 @@ export async function prepareSend({ entry, key, chain, to: rawTo, amount, index 
   return { to, policy, preview };
 }
 
-/** Broadcast a prepared send with ledger bookkeeping. Returns the chain result string (hash ...). */
+/**
+ * Broadcast a prepared send with ledger bookkeeping. Returns the chain result string (hash ...).
+ * The policy is re-evaluated and the pending reservation written inside one ledger lock, so two concurrent sends
+ * (two MCP calls, or CLI + MCP) cannot both pass the daily limit. The earlier evaluate() in prepareSend is advisory.
+ */
 export async function executeSend({ entry, chain, via, preview, overridden = false }) {
   const attempt = randomBytes(6).toString('hex');
   const base = { attempt, wallet: entry.id, label: entry.label, chain, to: preview.to, amount: Number(preview.amount), via, overridden };
-  appendLedger({ ...base, status: 'pending' });
+  await withLedgerLock(() => {
+    if (!overridden) {
+      const check = evaluate(entry, { chain, to: preview.to, amount: preview.amount, via });
+      if (!check.ok) {
+        appendLedger({ ...base, status: 'denied', reasons: check.reasons });
+        const err = new Error(`policy denied at broadcast time: ${check.reasons.join('; ')}`);
+        err.denied = true; err.reasons = check.reasons;
+        throw err;
+      }
+    }
+    appendLedger({ ...base, status: 'pending' });
+  });
   try {
     const result = await preview._exec();
     appendLedger({ ...base, status: 'sent', hash: String(result).split(' ')[0], result: String(result) });
