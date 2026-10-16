@@ -1,0 +1,25 @@
+{
+  "name": "wallet-vault",
+  "version": "0.1.0",
+  "description": "Local encrypted wallet generator + key vault (EVM, Solana). Mainnet personal wallets, created in seconds.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "wv": "./src/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/cli.mjs && node --check src/vault.mjs && node --check src/wallets.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0",
+    "@scure/bip39": "^2.4.0",
+    "micro-key-producer": "^0.10.2",
+    "viem": "^2.57.7"
+  }
+}
