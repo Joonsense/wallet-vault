@@ -44,7 +44,16 @@ wv send trader1 --chain sol --to <addr> --amount 0.1              # "send" 타�
 | avax | Avalanche C | AVAX | api.avax.network |
 | sol | Solana | SOL | api.mainnet-beta.solana.com |
 
-공개 RPC 는 속도 제한이 있으니 자주 쓰면 `WV_RPC_BASE=https://...` 처럼 체인별 RPC 를 .env 에 넣는다. 별칭: ethereum, arbitrum, optimism, bsc, matic, solana.
+테스트넷: `sepolia`, `base-sepolia`, `arb-sepolia`, `op-sepolia`, `bnb-testnet`, `amoy`, `fuji`, `sol-devnet`.
+`--chain all` 은 메인넷만, `--chain testnets` 는 테스트넷만, `--chain everything` 은 둘 다. send 미리보기 첫 줄에 MAINNET / testnet 이 표시된다.
+
+```bash
+wv faucet test1 --chain sol-devnet --amount 1   # devnet 에어드롭 (공개 RPC 한도 초과 시 faucet.solana.com 안내)
+wv faucet test1 --chain base-sepolia            # EVM 테스트넷은 주소 + 웹 faucet 주소 출력
+wv send test1 --chain sol-devnet --to <addr> --amount 0.1
+```
+
+공개 RPC 는 속도 제한이 있으니 자주 쓰면 `WV_RPC_BASE=https://...` 처럼 체인별 RPC 를 .env 에 넣는다 (하이픈은 밑줄로, 예 `WV_RPC_SOL_DEVNET`). 별칭: ethereum, arbitrum, optimism, bsc, matic, solana.
 
 ### send 안전장치
 

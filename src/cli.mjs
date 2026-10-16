@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { DEFAULT_VAULT_PATH, deriveKey, openVault, saveVaultFile, findEntry, addEntry, readSecret, removeEntry, rotatePassphrase, backupVaultFile } from './vault.mjs';
 import { CHAINS, generateMnemonic, walletFromMnemonic, evmFromPrivateKey, solFromSecretKey, evmFromMnemonic, solFromMnemonic } from './wallets.mjs';
 import { getPassphrase, hiddenPrompt, visiblePrompt } from './prompt.mjs';
-import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, ALL_KEYS } from './chains.mjs';
+import { resolveChainKeys, nativeBalance, previewSend, validateRecipient, symbolOf, explorerTx, ALL_KEYS, MAINNET_KEYS, TESTNET_KEYS, isSol, isTestnet, solAirdrop, EVM_FAUCETS } from './chains.mjs';
 
 const HELP = `wv - local encrypted wallet vault (EVM + Solana)
 
@@ -13,8 +13,9 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv show <id|label|address> [--index N]
   wv export <id|label> (--mnemonic | --evm | --sol) [--index N] [--yes]
   wv env <id|label> [--index N]            # eval "$(wv env trader1)" -> EVM_PRIVATE_KEY, SOL_SECRET_KEY
-  wv balance <id|label> [--chain eth,base,arb,op,bnb,polygon,avax,sol|all] [--index N] [--json]
+  wv balance <id|label> [--chain base,sol | all | testnets] [--index N] [--json]
   wv send <id|label> --chain base --to 0x... --amount 0.01 [--index N] [--dry-run] [--yes]
+  wv faucet <id|label> --chain sol-devnet [--amount 1]      # devnet airdrop; EVM testnets print faucet URLs
   wv import <label> (--mnemonic | --evm | --sol) [--chain ...]   # secret is asked via hidden prompt, never argv
   wv rename <id|label> <new-label>
   wv rm <id|label> [--yes]
@@ -22,7 +23,9 @@ const HELP = `wv - local encrypted wallet vault (EVM + Solana)
   wv backup <dest-file>
   wv path                                  # vault location
 
-  Chains: ${ALL_KEYS.join(' ')}   RPC override: WV_RPC_<CHAIN> (e.g. WV_RPC_BASE, WV_RPC_SOL)
+  Mainnets: ${MAINNET_KEYS.join(' ')}
+  Testnets: ${TESTNET_KEYS.join(' ')}
+  RPC override: WV_RPC_<CHAIN> with - as _ (e.g. WV_RPC_BASE_SEPOLIA, WV_RPC_SOL_DEVNET)
   Vault: ${DEFAULT_VAULT_PATH}  (override with WV_VAULT)
   Passphrase: prompted, or WV_PASSPHRASE env (put it in .env, never commit).
   Secrets print only on export/env, to stdout, with a warning on stderr.`;
@@ -186,18 +189,18 @@ async function main() {
     const { vault, key } = await open();
     const e = findEntry(vault, args[0] ?? err('wallet ref required'));
     const idx = Number(opt.index);
-    const keys = resolveChainKeys(opt.chain === 'all' ? null : opt.chain).filter(k => (k === 'sol' ? e.chains.includes('sol') : e.chains.includes('evm')));
+    const keys = resolveChainKeys(opt.chain === 'all' ? null : opt.chain).filter(k => (isSol(k) ? e.chains.includes('sol') : e.chains.includes('evm')));
     if (!keys.length) err('this wallet has no key for the requested chains');
     // address only; no secret needed unless index > 0
     const w = idx === 0 ? { evm: { address: e.addresses.evm }, sol: { address: e.addresses.sol } } : materialize(e, readSecret(e, key), idx);
     const rows = await Promise.all(keys.map(async k => {
-      const address = k === 'sol' ? w.sol.address : w.evm.address;
+      const address = isSol(k) ? w.sol.address : w.evm.address;
       try { return { chain: k, symbol: symbolOf(k), address, balance: await nativeBalance(k, address) }; }
       catch (x) { return { chain: k, symbol: symbolOf(k), address, error: (x.shortMessage || x.message || String(x)).split('\n')[0].slice(0, 80) }; }
     }));
     if (opt.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     for (const r of rows) {
-      console.log(`${r.chain.padEnd(8)} ${r.error ? 'error: ' + r.error : (Number(r.balance) === 0 ? '0' : r.balance) + ' ' + r.symbol}`);
+      console.log(`${r.chain.padEnd(12)} ${r.error ? 'error: ' + r.error : (Number(r.balance) === 0 ? '0' : r.balance) + ' ' + r.symbol}${isTestnet(r.chain) ? '  (testnet)' : ''}`);
     }
     return;
   }
@@ -210,14 +213,14 @@ async function main() {
     const to = validateRecipient(k, opt.to);
     const { vault, key } = await open();
     const e = findEntry(vault, args[0] ?? err('wallet ref required'));
-    if (!e.chains.includes(k === 'sol' ? 'sol' : 'evm')) err(`wallet has no ${k === 'sol' ? 'solana' : 'evm'} key`);
+    if (!e.chains.includes(isSol(k) ? 'sol' : 'evm')) err(`wallet has no ${isSol(k) ? 'solana' : 'evm'} key`);
     const w = materialize(e, readSecret(e, key), Number(opt.index));
     const p = await previewSend(k, {
-      from: k === 'sol' ? w.sol.address : w.evm.address, to, amount: opt.amount,
+      from: isSol(k) ? w.sol.address : w.evm.address, to, amount: opt.amount,
       privateKey: w.evm?.privateKey, secretKey: w.sol?.secretKey,
     });
     warn([
-      `chain    ${k}`,
+      `chain    ${k}${isTestnet(k) ? '  (testnet, no real value)' : '  (MAINNET, real funds)'}`,
       `from     ${p.from}  (#${e.id} ${e.label}${Number(opt.index) ? ' index ' + opt.index : ''})`,
       `to       ${p.to}`,
       `amount   ${p.amount} ${p.symbol}`,
@@ -235,6 +238,25 @@ async function main() {
     const hash = String(result).split(' ')[0];
     console.log(result);
     warn(explorerTx(k, hash));
+    return;
+  }
+
+  if (cmd === 'faucet') {
+    const [k] = resolveChainKeys(opt.chain === 'all' ? err('--chain required (sol-devnet or an EVM testnet)') : opt.chain);
+    if (!isTestnet(k)) err(`${k} is a mainnet; faucets are for testnets only`);
+    const { vault } = await open();
+    const e = findEntry(vault, args[0] ?? err('wallet ref required'));
+    if (isSol(k)) {
+      if (!e.addresses.sol) err('wallet has no solana key');
+      const amount = opt.amount ? Number(opt.amount) : 1;
+      warn(`requesting ${amount} SOL airdrop on ${k} for ${e.addresses.sol} ...`);
+      const sig = await solAirdrop(k, e.addresses.sol, amount);
+      console.log(sig);
+      warn(explorerTx(k, sig));
+      return;
+    }
+    if (!e.addresses.evm) err('wallet has no evm key');
+    console.log(`${k} has no RPC faucet. Paste this address into one of:\n  ${e.addresses.evm}\n` + EVM_FAUCETS[k].map(u => `  ${u}`).join('\n'));
     return;
   }
 
